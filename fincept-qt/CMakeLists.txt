@@ -55,11 +55,15 @@ set(CMAKE_AUTOUIC ON)
 # Fincept Terminal ships on 3 platforms and cannot tolerate compiler-version
 # drift. These checks fail the build early with an actionable message rather
 # than letting the user hit a cryptic template error 10 minutes into compile.
-if(MSVC AND MSVC_VERSION LESS 1938)
+if(MSVC AND MSVC_VERSION LESS 1940)
     message(FATAL_ERROR
-        "MSVC 19.38 (Visual Studio 2022 17.8) or newer required.\n"
+        "MSVC 19.40 (Visual Studio 2022 17.10) or newer required.\n"
         "Detected MSVC_VERSION: ${MSVC_VERSION}\n"
-        "Install VS 2022 17.8+ from https://visualstudio.microsoft.com/downloads/")
+        "Install VS 2022 17.10+ from https://visualstudio.microsoft.com/downloads/\n"
+        "Rationale: pinning to 17.10+ keeps the UCRT import lib in sync with "
+        "Windows 11 26H2 / Server 2025 shipped UCRT (10.0.26100+). Older toolchains "
+        "have been observed to produce STATUS_STACK_BUFFER_OVERRUN at startup on "
+        "26H2 (see issue #215).")
 endif()
 if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU" AND CMAKE_CXX_COMPILER_VERSION VERSION_LESS 12.3)
     message(FATAL_ERROR
@@ -327,7 +331,7 @@ else()
 endif()
 
 find_package(Qt6 ${_FINCEPT_QT_VER_ARGS} REQUIRED COMPONENTS
-    Widgets Charts PrintSupport Network Sql Concurrent Multimedia)
+    Widgets Charts PrintSupport Network Sql Concurrent Multimedia LinguistTools)
 
 # Optional: WebSockets (not always installed)
 find_package(Qt6 ${_FINCEPT_QT_VER_ARGS} QUIET COMPONENTS WebSockets)
@@ -635,6 +639,7 @@ set(CORE_SOURCES
     src/core/debug/StressLoad.cpp
     src/core/session/SessionManager.cpp
     src/core/session/ScreenStateManager.cpp
+    src/core/i18n/LanguageManager.cpp
     src/core/keys/KeyConfigManager.cpp
     src/core/keys/WindowCycler.cpp
     src/core/net/NetSpeedMeter.cpp
@@ -718,8 +723,10 @@ set(STORAGE_SOURCES
     src/storage/repositories/PaperTradingRepository.cpp
     src/storage/repositories/NewsMonitorRepository.cpp
     src/storage/repositories/NewsArticleRepository.cpp
+    src/storage/repositories/RssFeedRepository.cpp
     src/storage/repositories/PortfolioHoldingsRepository.cpp
     src/storage/repositories/ChatRepository.cpp
+    src/storage/repositories/DashboardLayoutRepository.cpp
     src/storage/repositories/LlmConfigRepository.cpp
     src/storage/repositories/LlmProfileRepository.cpp
     src/storage/repositories/DataSourceRepository.cpp
@@ -771,6 +778,8 @@ set(STORAGE_SOURCES
     src/storage/sqlite/migrations/v027_fii_dii.cpp
     src/storage/sqlite/migrations/v028_iv_history.cpp
     src/storage/sqlite/migrations/v029_secure_credentials.cpp
+    src/storage/sqlite/migrations/v030_max_tool_rounds.cpp
+    src/storage/sqlite/migrations/v031_rss_feeds.cpp
 )
 
 # Python runner
@@ -781,20 +790,28 @@ set(PYTHON_SOURCES
     src/python/OptionGreeksWorker.cpp
 )
 
-# AI Chat
-set(AI_CHAT_SOURCES
-    src/ai_chat/LlmService.cpp
-    src/ai_chat/LlmContentExtractors.cpp
-    src/ai_chat/LlmHttpHelpers.cpp
-    src/ai_chat/LlmRequestBuilders.cpp
-    src/ai_chat/LlmModelsApi.cpp
-    src/ai_chat/LlmFinceptAsync.cpp
-    src/ai_chat/LlmToolLoop.cpp
-    src/ai_chat/ModelCatalog.cpp
-    src/ai_chat/ChatBubbleFactory.cpp
-    src/ai_chat/AiChatScreen.cpp
-    src/ai_chat/AiChatBubble.cpp
-    src/ai_chat/ChatBubbleController.cpp
+# LLM service — provider-neutral chat / streaming / tools layer
+set(LLM_SERVICE_SOURCES
+    src/services/llm/LlmService.cpp
+    src/services/llm/LlmContentExtractors.cpp
+    src/services/llm/LlmHttpHelpers.cpp
+    src/services/llm/LlmRequestBuilders.cpp
+    src/services/llm/LlmModelsApi.cpp
+    src/services/llm/LlmFinceptAsync.cpp
+    src/services/llm/LlmToolLoop.cpp
+    src/services/llm/ModelCatalog.cpp
+)
+
+# AI Chat screen — UI for chatting with the LLM service
+set(AI_CHAT_SCREEN_SOURCES
+    src/screens/ai_chat/ChatBubbleFactory.cpp
+    # AiChatScreen split; see header.
+    src/screens/ai_chat/AiChatScreen.cpp
+    src/screens/ai_chat/AiChatScreen_Layout.cpp
+    src/screens/ai_chat/AiChatScreen_Sessions.cpp
+    src/screens/ai_chat/AiChatScreen_Messaging.cpp
+    src/screens/ai_chat/AiChatBubble.cpp
+    src/screens/ai_chat/ChatBubbleController.cpp
 )
 
 # MCP — Model Context Protocol system
@@ -809,17 +826,13 @@ set(MCP_SOURCES
     src/mcp/ToolRetriever.cpp
     src/mcp/TerminalMcpBridge.cpp
 
-    # Phase 5 — provider-neutral tool-call dispatcher + adapters.
-    src/mcp/dispatch/ToolDispatcher.cpp
-    src/mcp/dispatch/OpenAiAdapter.cpp
-    src/mcp/dispatch/AdapterFactory.cpp
-
     # Tool modules
     src/mcp/tools/NavigationTools.cpp
     src/mcp/tools/MarketsTools.cpp
     src/mcp/tools/WatchlistTools.cpp
     src/mcp/tools/NewsTools.cpp
     src/mcp/tools/NotesTools.cpp
+    src/mcp/tools/AgenticMemoryTools.cpp
     src/mcp/tools/FileManagerTools.cpp
     src/mcp/tools/AiChatTools.cpp
     src/mcp/tools/PortfolioTools.cpp
@@ -837,6 +850,26 @@ set(MCP_SOURCES
     src/mcp/tools/DataHubTools.cpp
     src/mcp/tools/ReportBuilderTools.cpp
     src/mcp/tools/MetaTools.cpp
+    src/mcp/tools/McpServersTools.cpp
+    src/mcp/tools/QuantLabTools.cpp
+    # AgentsTools split by section; see AgentsTools.cpp header.
+    src/mcp/tools/AgentsTools.cpp
+    src/mcp/tools/AgentsTools_Discovery.cpp
+    src/mcp/tools/AgentsTools_Execution.cpp
+    src/mcp/tools/AgentsTools_Repos.cpp
+    src/mcp/tools/DBnomicsTools.cpp
+    src/mcp/tools/GovDataTools.cpp
+    src/mcp/tools/EquityResearchTools.cpp
+    # WorkspaceTools split by section; see WorkspaceTools.cpp header.
+    src/mcp/tools/WorkspaceTools.cpp
+    src/mcp/tools/WorkspaceTools_MonitorsWindows.cpp
+    src/mcp/tools/WorkspaceTools_Panels.cpp
+    src/mcp/tools/WorkspaceTools_LayoutsSnapshots.cpp
+    src/mcp/tools/WorkspaceTools_SymbolsActions.cpp
+    src/mcp/tools/DashboardTools.cpp
+    src/mcp/tools/GeopoliticsTools.cpp
+    src/mcp/tools/ExcelTools.cpp
+    src/mcp/tools/SurfaceAnalyticsTools.cpp
 )
 
 # Trading
@@ -892,6 +925,7 @@ set(TRADING_SOURCES
     src/trading/instruments/ZerodhaInstrumentParser.cpp
     src/trading/instruments/GrowwInstrumentParser.cpp
     src/trading/instruments/InstrumentService.cpp
+    src/trading/instruments/SymbolResolver.cpp
 )
 
 # Services
@@ -913,6 +947,7 @@ set(SERVICE_SOURCES
     src/services/crypto/TotpService.cpp
     src/services/python_cli/PythonCliService.cpp
     src/services/markets/MarketDataService.cpp
+    src/services/markets/MarketSearchService.cpp
     src/services/options/OptionChainService.cpp
     src/services/options/OISnapshotter.cpp
     src/services/options/StrategyTemplates.cpp
@@ -920,7 +955,15 @@ set(SERVICE_SOURCES
     src/services/options/StrategyAnalytics.cpp
     src/services/options/FiiDiiService.cpp
     src/services/data_normalization/DataNormalizationService.cpp
+    src/services/data_normalization/DataMappingTestClient.cpp
+    src/core/services/Services.cpp
+    src/python/ScriptCatalog.cpp
+    # NewsService split; see NewsService.cpp header.
     src/services/news/NewsService.cpp
+    src/services/news/NewsService_LiveFeed.cpp
+    src/services/news/NewsService_Parsing.cpp
+    src/services/news/NewsService_Classification.cpp
+    src/services/news/NewsService_Feeds.cpp
     src/services/news/NewsClusterService.cpp
     src/services/news/NewsMonitorService.cpp
     src/services/news/NewsNlpService.cpp
@@ -938,12 +981,21 @@ set(SERVICE_SOURCES
     src/services/ai_quant_lab/AIQuantLabService.cpp
     src/services/backtesting/BacktestingService.cpp
     src/services/algo_trading/AlgoTradingService.cpp
+    # PortfolioService split; see header comment.
     src/services/portfolio/PortfolioService.cpp
+    src/services/portfolio/PortfolioService_Summary.cpp
+    src/services/portfolio/PortfolioService_Metrics.cpp
+    src/services/portfolio/PortfolioService_ImportExport.cpp
     src/services/portfolio/PortfolioAnalyticsService.cpp
     src/services/quantlib/QuantLibClient.cpp
     src/services/economics/EconomicsService.cpp
     src/services/economics/MacroCalendarService.cpp
+    # AgentService is split across multiple files; see AgentService.cpp header.
     src/services/agents/AgentService.cpp
+    src/services/agents/AgentService_Discovery.cpp
+    src/services/agents/AgentService_Execution.cpp
+    src/services/agents/AgentService_Workflows.cpp
+    src/services/agents/AgentService_Repositories.cpp
     src/services/file_manager/FileManagerService.cpp
 
     # Wallet (Phase 1 — Solana wallet identity + balance display)
@@ -982,7 +1034,11 @@ set(SERVICE_SOURCES
     src/services/pushpins/PushpinService.cpp
     src/services/workflow/nodes/TriggerNodes.cpp
     src/services/workflow/nodes/ControlFlowNodes.cpp
+    # UtilityNodes split by tier; see header.
     src/services/workflow/nodes/UtilityNodes.cpp
+    src/services/workflow/nodes/UtilityNodes_Tier1Core.cpp
+    src/services/workflow/nodes/UtilityNodes_Tier1Extra.cpp
+    src/services/workflow/nodes/UtilityNodes_Tier2.cpp
     src/services/workflow/nodes/MarketDataNodes.cpp
     src/services/workflow/nodes/TradingNodes.cpp
     src/services/workflow/nodes/AnalyticsNodes.cpp
@@ -1025,7 +1081,7 @@ set(SERVICE_SOURCES
     # for Qt6::TextToSpeech when the Qt Speech module isn't installed).
     src/services/tts/TtsService.cpp
 
-    # Clap-to-start trigger — lightweight pyaudio loop that fires a signal
+    # Clap-to-start trigger — lightweight sounddevice loop that fires a signal
     # when it hears a (double-)clap. Wakes up the AiChatBubble mic.
     src/services/voice_trigger/ClapDetectorService.cpp
 
@@ -1067,13 +1123,18 @@ set(UI_SOURCES
     src/ui/widgets/LoadingOverlay.cpp
     src/ui/widgets/ConfettiOverlay.cpp
     src/ui/widgets/SpeedSparkline.cpp
+    src/ui/widgets/LanguageSwitcher.cpp
     src/ui/tables/DataTable.cpp
     src/ui/charts/ChartFactory.cpp
     src/ui/navigation/NavigationBar.cpp
     src/ui/navigation/FKeyBar.cpp
     src/ui/navigation/StatusBar.cpp
     src/ui/navigation/ToolBar.cpp
+    # CommandBar split; see CommandBar.cpp header.
     src/ui/navigation/CommandBar.cpp
+    src/ui/navigation/CommandBar_Input.cpp
+    src/ui/navigation/CommandBar_Suggestions.cpp
+    src/ui/navigation/CommandBar_Assets.cpp
     src/ui/navigation/DockToolBar.cpp
     src/ui/navigation/DockStatusBar.cpp
     src/ui/debug/DebugOverlay.cpp
@@ -1110,6 +1171,8 @@ set(SCREEN_SOURCES
     src/screens/settings/StorageSection.cpp
     src/screens/settings/DataSourcesSection.cpp
     src/screens/settings/LlmConfigSection.cpp
+    src/screens/settings/LlmConfigSection_Providers.cpp
+    src/screens/settings/LlmConfigSection_Profiles.cpp
     src/screens/settings/McpServersSection.cpp
     src/screens/settings/LoggingSection.cpp
     src/screens/settings/SecuritySection.cpp
@@ -1120,9 +1183,15 @@ set(SCREEN_SOURCES
     src/screens/settings/VoiceConfigSection.cpp
     src/screens/about/AboutScreen.cpp
     src/screens/support/SupportScreen.cpp
+    src/screens/support/SupportScreen_Layout.cpp
+    src/screens/support/SupportScreen_Actions.cpp
     src/screens/trade_viz/TradeVizScreen.cpp
+    # DocsScreen split into pages files; see DocsScreen.cpp header.
     src/screens/docs/DocsScreen.cpp
-    src/screens/ComingSoonScreen.cpp
+    src/screens/docs/DocsScreen_Pages_Intro.cpp
+    src/screens/docs/DocsScreen_Pages_Trading.cpp
+    src/screens/docs/DocsScreen_Pages_Data.cpp
+    src/screens/common/ComingSoonScreen.cpp
     src/screens/chat_mode/ChatModeService.cpp
     src/screens/chat_mode/ChatSessionPanel.cpp
     src/screens/chat_mode/ChatMessagePanel.cpp
@@ -1193,7 +1262,10 @@ set(SCREEN_SOURCES
     src/screens/dashboard/widgets/GeopoliticsEventsWidget.cpp
     src/screens/dashboard/widgets/MaritimeVesselsWidget.cpp
     src/screens/dashboard/widgets/NotesWidget.cpp
+    # ReportBuilderScreen split; see header.
     src/screens/report_builder/ReportBuilderScreen.cpp
+    src/screens/report_builder/ReportBuilderScreen_Components.cpp
+    src/screens/report_builder/ReportBuilderScreen_Dialogs.cpp
     src/screens/report_builder/ComponentToolbar.cpp
     src/screens/report_builder/DocumentCanvas.cpp
     src/screens/report_builder/PropertiesPanel.cpp
@@ -1205,6 +1277,8 @@ set(SCREEN_SOURCES
     src/screens/news/NewsFeedDelegate.cpp
     src/screens/news/NewsDetailPanel.cpp
     src/screens/news/NewsTickerStrip.cpp
+    src/screens/news/dialogs/RssFeedManagerDialog.cpp
+    src/screens/news/dialogs/RssFeedEditDialog.cpp
     src/screens/forum/ForumScreen.cpp
     src/screens/forum/ForumFeedPanel.cpp
     src/screens/forum/ForumSidebarPanel.cpp
@@ -1212,7 +1286,11 @@ set(SCREEN_SOURCES
     src/screens/forum/ForumPostReaderPanel.cpp
     src/screens/forum/ForumThreadPanel.cpp
     src/services/forum/ForumService.cpp
+    # CryptoTradingScreen split; see header comment.
     src/screens/crypto_trading/CryptoTradingScreen.cpp
+    src/screens/crypto_trading/CryptoTradingScreen_Handlers.cpp
+    src/screens/crypto_trading/CryptoTradingScreen_Refresh.cpp
+    src/screens/crypto_trading/CryptoTradingScreen_AsyncFetch.cpp
     src/screens/crypto_trading/CryptoTickerBar.cpp
     src/screens/crypto_trading/CryptoWatchlist.cpp
     src/screens/crypto_trading/CryptoChart.cpp
@@ -1222,7 +1300,11 @@ set(SCREEN_SOURCES
     src/screens/crypto_trading/CryptoCredentials.cpp
     src/screens/crypto_trading/CryptoTimeSales.cpp
     src/screens/crypto_trading/CryptoDepthChart.cpp
+    # EquityTradingScreen split; see header comment.
     src/screens/equity_trading/EquityTradingScreen.cpp
+    src/screens/equity_trading/EquityTradingScreen_Streams.cpp
+    src/screens/equity_trading/EquityTradingScreen_Handlers.cpp
+    src/screens/equity_trading/EquityTradingScreen_Holdings.cpp
     src/screens/equity_trading/EquityTickerBar.cpp
     src/screens/equity_trading/EquityWatchlist.cpp
     src/screens/equity_trading/EquityChart.cpp
@@ -1231,7 +1313,11 @@ set(SCREEN_SOURCES
     src/screens/equity_trading/EquityBottomPanel.cpp
     src/screens/equity_trading/AccountManagementDialog.cpp
     src/screens/equity_trading/BroadcastOrderDialog.cpp
+    # DataSourcesScreen split; see DataSourcesScreen.cpp header.
     src/screens/data_sources/DataSourcesScreen.cpp
+    src/screens/data_sources/DataSourcesScreen_Layout.cpp
+    src/screens/data_sources/DataSourcesScreen_Tables.cpp
+    src/screens/data_sources/DataSourcesScreen_Handlers.cpp
     src/screens/data_sources/DataSourcesHelpers.cpp
     src/screens/data_sources/ConnectionConfigDialog.cpp
     src/screens/data_sources/ConnectionTester.cpp
@@ -1256,14 +1342,21 @@ set(SCREEN_SOURCES
     src/screens/surface_analytics/SurfaceLineWidget.cpp
     src/screens/surface_analytics/SurfaceControlPanel.cpp
     src/screens/surface_analytics/SurfaceDataInspector.cpp
+    # SurfaceAnalyticsScreen is split; see SurfaceAnalyticsScreen.cpp header.
     src/screens/surface_analytics/SurfaceAnalyticsScreen.cpp
+    src/screens/surface_analytics/SurfaceAnalyticsScreen_Layout.cpp
+    src/screens/surface_analytics/SurfaceAnalyticsScreen_Views.cpp
+    src/screens/surface_analytics/SurfaceAnalyticsScreen_Handlers.cpp
+    src/screens/surface_analytics/SurfaceAnalyticsScreen_Providers.cpp
     src/screens/dbnomics/DBnomicsDataTable.cpp
     src/screens/dbnomics/DBnomicsChartWidget.cpp
     src/screens/dbnomics/DBnomicsSelectionPanel.cpp
     src/screens/dbnomics/DBnomicsScreen.cpp
 
-    # Code Editor (Python Colab)
+    # Code Editor (Python Colab) — partial-class split: see header comment.
     src/screens/code_editor/CodeEditorScreen.cpp
+    src/screens/code_editor/CodeEditorScreen_Cells.cpp
+    src/screens/code_editor/CodeEditorScreen_Navigator.cpp
 
     # Excel Spreadsheet
     src/screens/excel/ExcelScreen.cpp
@@ -1318,31 +1411,42 @@ set(SCREEN_SOURCES
     src/screens/geopolitics/RelationshipPanel.cpp
     src/screens/geopolitics/TradeAnalysisPanel.cpp
 
-    # Maritime Intelligence
+    # Maritime Intelligence — partial-class split; see header.
     src/screens/maritime/MaritimeScreen.cpp
+    src/screens/maritime/MaritimeScreen_Layout.cpp
+    src/screens/maritime/MaritimeScreen_Handlers.cpp
 
     # AI Quant Lab
     src/screens/ai_quant_lab/AIQuantLabScreen.cpp
     src/screens/ai_quant_lab/QuantModulePanel.cpp
+    src/screens/ai_quant_lab/QuantModulePanel_Results.cpp
     src/screens/ai_quant_lab/QuantModulePanel_GS.cpp
     src/screens/ai_quant_lab/QuantModulePanel_Functime.cpp
     src/screens/ai_quant_lab/QuantModulePanel_Statsmodels.cpp
     src/screens/ai_quant_lab/QuantModulePanel_Fortitudo.cpp
     src/screens/ai_quant_lab/QuantModulePanel_Gluonts.cpp
     src/screens/ai_quant_lab/QuantModulePanel_CFA.cpp
+    src/screens/ai_quant_lab/QuantModulePanel_CFA_Display.cpp
     src/screens/ai_quant_lab/QuantModulePanel_Backtesting.cpp
     src/screens/ai_quant_lab/QuantModulePanel_RL.cpp
     src/screens/ai_quant_lab/QuantModulePanel_DeepAgent.cpp
     src/screens/ai_quant_lab/QuantModulePanel_QuantReporting.cpp
     src/screens/ai_quant_lab/QuantModulePanel_AdvancedDisplays.cpp
+    src/screens/ai_quant_lab/QuantModulePanel_AdvancedDisplays_Models.cpp
+    src/screens/ai_quant_lab/QuantModulePanel_AdvancedDisplays_Factors.cpp
     src/screens/ai_quant_lab/QuantModulePanel_AIMLDisplays.cpp
     src/screens/ai_quant_lab/QuantModulePanel_CoreDisplays.cpp
     src/screens/ai_quant_lab/QuantModulePanel_Misc.cpp
     src/screens/ai_quant_lab/QuantModulePanel_HFT.cpp
     src/screens/ai_quant_lab/QuantModulePanel_LiveLearning.cpp
 
-    # Backtesting
+    # Backtesting (partial-class split across logical sub-files; see
+    # BacktestingScreen.cpp header comment for the layout).
     src/screens/backtesting/BacktestingScreen.cpp
+    src/screens/backtesting/BacktestingScreen_Layout.cpp
+    src/screens/backtesting/BacktestingScreen_Commands.cpp
+    src/screens/backtesting/BacktestingScreen_Strategies.cpp
+    src/screens/backtesting/BacktestingScreen_Results.cpp
 
     # Algo Trading
     src/screens/algo_trading/AlgoTradingScreen.cpp
@@ -1351,8 +1455,11 @@ set(SCREEN_SOURCES
     src/screens/algo_trading/ScannerPanel.cpp
     src/screens/algo_trading/DeploymentDashboard.cpp
 
-    # Data Mapping
+    # Data Mapping (partial-class split; see DataMappingScreen.cpp header).
     src/screens/data_mapping/DataMappingScreen.cpp
+    src/screens/data_mapping/DataMappingScreen_Data.cpp
+    src/screens/data_mapping/DataMappingScreen_Layout.cpp
+    src/screens/data_mapping/DataMappingScreen_Operations.cpp
 
     # Economics
     src/screens/economics/EconomicsScreen.cpp
@@ -1411,14 +1518,19 @@ set(SCREEN_SOURCES
     src/screens/alpha_arena/panels/StatePanels.cpp
     src/screens/alpha_arena/panels/LiveModeGateDialog.cpp
 
-    # Alternative Investments
+    # Alternative Investments — partial-class split; see header.
     src/screens/alt_investments/AltInvestmentsScreen.cpp
+    src/screens/alt_investments/AltInvestmentsScreen_Layout.cpp
+    src/screens/alt_investments/AltInvestmentsScreen_Analysis.cpp
 
-    # MCP Servers
+    # MCP Servers — partial-class split; see header.
     src/screens/mcp_servers/McpServersScreen.cpp
+    src/screens/mcp_servers/McpServersScreen_Layout.cpp
+    src/screens/mcp_servers/McpServersScreen_Actions.cpp
 
-    # QuantLib Suite
+    # QuantLib Suite — endpoint catalogs split out; see header comment.
     src/screens/quantlib/QuantLibScreen.cpp
+    src/screens/quantlib/QuantLibScreen_Data.cpp
 
     # M&A Analytics
     src/screens/ma_analytics/MAAnalyticsScreen.cpp
@@ -1436,6 +1548,8 @@ set(SCREEN_SOURCES
     src/screens/equity_research/EquityResearchScreen.cpp
     src/screens/equity_research/EquityOverviewTab.cpp
     src/screens/equity_research/EquityFinancialsTab.cpp
+    src/screens/equity_research/EquityFinancialsTab_Views.cpp
+    src/screens/equity_research/EquityFinancialsTab_Populate.cpp
     src/screens/equity_research/EquityAnalysisTab.cpp
     src/screens/equity_research/EquityTechnicalsTab.cpp
     src/screens/equity_research/EquityTalippTab.cpp
@@ -1443,8 +1557,10 @@ set(SCREEN_SOURCES
     src/screens/equity_research/EquityNewsTab.cpp
     src/screens/equity_research/EquitySentimentTab.cpp
 
-    # Portfolio
+    # Portfolio — PortfolioScreen split; see header.
     src/screens/portfolio/PortfolioScreen.cpp
+    src/screens/portfolio/PortfolioScreen_Layout.cpp
+    src/screens/portfolio/PortfolioScreen_Handlers.cpp
     src/screens/portfolio/PortfolioCommandBar.cpp
     src/screens/portfolio/PortfolioStatsRibbon.cpp
     src/screens/portfolio/PortfolioStatusBar.cpp
@@ -1472,11 +1588,14 @@ set(SCREEN_SOURCES
     src/screens/agent_config/AgentsViewPanel.cpp
     src/screens/agent_config/SystemViewPanel.cpp
     src/screens/agent_config/CreateAgentPanel.cpp
+    src/screens/agent_config/CreateAgentPanel_Layout.cpp
+    src/screens/agent_config/CreateAgentPanel_DataOps.cpp
     src/screens/agent_config/ToolsViewPanel.cpp
     src/screens/agent_config/AgentChatPanel.cpp
     src/screens/agent_config/TeamsViewPanel.cpp
     src/screens/agent_config/WorkflowsViewPanel.cpp
     src/screens/agent_config/PlannerViewPanel.cpp
+    src/screens/agent_config/AgenticTasksPanel.cpp
 
     # Node Editor
     src/screens/node_editor/NodeEditorScreen.cpp
@@ -1524,9 +1643,20 @@ set(SCREEN_SOURCES
 set(APP_SOURCES
     src/app/main.cpp
     src/app/InstanceLock.cpp
+    # WindowFrame is split across multiple files; see WindowFrame.cpp header
+    # comment for the layout. All variants stay outside unity build (see
+    # SKIP_UNITY_BUILD_INCLUSION block below).
     src/app/WindowFrame.cpp
+    src/app/WindowFrame_Setup.cpp
+    src/app/WindowFrame_Auth.cpp
+    src/app/WindowFrame_Layout.cpp
+    src/app/WindowFrame_Actions.cpp
     src/app/ScreenRouter.cpp
+    # DockScreenRouter split; see DockScreenRouter.cpp header.
     src/app/DockScreenRouter.cpp
+    src/app/DockScreenRouter_Navigation.cpp
+    src/app/DockScreenRouter_PanelOps.cpp
+    src/app/DockScreenRouter_Materialize.cpp
     src/app/TerminalShell.cpp
     src/app/MonitorPickerDialog.cpp
 )
@@ -1535,7 +1665,7 @@ set(APP_SOURCES
 # collide when batched, and many use QLineEdit/etc without explicit includes.
 # Infrastructure layers (core, network, auth, storage, services) still benefit from unity.
 set_source_files_properties(
-    src/screens/ComingSoonScreen.cpp
+    src/screens/common/ComingSoonScreen.cpp
     src/screens/about/AboutScreen.cpp
     src/screens/agent_config/AgentChatPanel.cpp
     src/screens/agent_config/AgentConfigScreen.cpp
@@ -1546,19 +1676,33 @@ set_source_files_properties(
     src/screens/agent_config/TeamsViewPanel.cpp
     src/screens/agent_config/ToolsViewPanel.cpp
     src/screens/agent_config/WorkflowsViewPanel.cpp
+    src/screens/agent_config/AgenticTasksPanel.cpp
+    src/screens/agent_config/CreateAgentPanel_Layout.cpp
+    src/screens/agent_config/CreateAgentPanel_DataOps.cpp
+    src/screens/ai_chat/AiChatScreen.cpp
+    src/screens/ai_chat/AiChatScreen_Layout.cpp
+    src/screens/ai_chat/AiChatScreen_Sessions.cpp
+    src/screens/ai_chat/AiChatScreen_Messaging.cpp
+    src/screens/ai_chat/AiChatBubble.cpp
+    src/screens/ai_chat/ChatBubbleController.cpp
+    src/screens/ai_chat/ChatBubbleFactory.cpp
     src/screens/ai_quant_lab/AIQuantLabScreen.cpp
     src/screens/ai_quant_lab/QuantModulePanel.cpp
+    src/screens/ai_quant_lab/QuantModulePanel_Results.cpp
     src/screens/ai_quant_lab/QuantModulePanel_GS.cpp
     src/screens/ai_quant_lab/QuantModulePanel_Functime.cpp
     src/screens/ai_quant_lab/QuantModulePanel_Statsmodels.cpp
     src/screens/ai_quant_lab/QuantModulePanel_Fortitudo.cpp
     src/screens/ai_quant_lab/QuantModulePanel_Gluonts.cpp
     src/screens/ai_quant_lab/QuantModulePanel_CFA.cpp
+    src/screens/ai_quant_lab/QuantModulePanel_CFA_Display.cpp
     src/screens/ai_quant_lab/QuantModulePanel_Backtesting.cpp
     src/screens/ai_quant_lab/QuantModulePanel_RL.cpp
     src/screens/ai_quant_lab/QuantModulePanel_DeepAgent.cpp
     src/screens/ai_quant_lab/QuantModulePanel_QuantReporting.cpp
     src/screens/ai_quant_lab/QuantModulePanel_AdvancedDisplays.cpp
+    src/screens/ai_quant_lab/QuantModulePanel_AdvancedDisplays_Models.cpp
+    src/screens/ai_quant_lab/QuantModulePanel_AdvancedDisplays_Factors.cpp
     src/screens/ai_quant_lab/QuantModulePanel_AIMLDisplays.cpp
     src/screens/ai_quant_lab/QuantModulePanel_CoreDisplays.cpp
     src/screens/ai_quant_lab/QuantModulePanel_Misc.cpp
@@ -1576,6 +1720,8 @@ set_source_files_properties(
     src/screens/alpha_arena/panels/StatePanels.cpp
     src/screens/alpha_arena/panels/LiveModeGateDialog.cpp
     src/screens/alt_investments/AltInvestmentsScreen.cpp
+    src/screens/alt_investments/AltInvestmentsScreen_Layout.cpp
+    src/screens/alt_investments/AltInvestmentsScreen_Analysis.cpp
     src/screens/asia_markets/AsiaMarketsScreen.cpp
     src/screens/auth/ForgotPasswordScreen.cpp
     src/screens/auth/LockScreen.cpp
@@ -1583,7 +1729,13 @@ set_source_files_properties(
     src/screens/auth/PricingScreen.cpp
     src/screens/auth/RegisterScreen.cpp
     src/screens/backtesting/BacktestingScreen.cpp
+    src/screens/backtesting/BacktestingScreen_Layout.cpp
+    src/screens/backtesting/BacktestingScreen_Commands.cpp
+    src/screens/backtesting/BacktestingScreen_Strategies.cpp
+    src/screens/backtesting/BacktestingScreen_Results.cpp
     src/screens/code_editor/CodeEditorScreen.cpp
+    src/screens/code_editor/CodeEditorScreen_Cells.cpp
+    src/screens/code_editor/CodeEditorScreen_Navigator.cpp
     src/screens/crypto_trading/CryptoBottomPanel.cpp
     src/screens/crypto_trading/CryptoChart.cpp
     src/screens/crypto_trading/CryptoCredentials.cpp
@@ -1592,9 +1744,16 @@ set_source_files_properties(
     src/screens/crypto_trading/CryptoTickerBar.cpp
     src/screens/crypto_trading/CryptoTimeSales.cpp
     src/screens/crypto_trading/CryptoTradingScreen.cpp
+    src/screens/crypto_trading/CryptoTradingScreen_Handlers.cpp
+    src/screens/crypto_trading/CryptoTradingScreen_Refresh.cpp
+    src/screens/crypto_trading/CryptoTradingScreen_AsyncFetch.cpp
     src/screens/crypto_trading/CryptoWatchlist.cpp
     src/screens/crypto_trading/CryptoDepthChart.cpp
+    # EquityTradingScreen split; see header comment.
     src/screens/equity_trading/EquityTradingScreen.cpp
+    src/screens/equity_trading/EquityTradingScreen_Streams.cpp
+    src/screens/equity_trading/EquityTradingScreen_Handlers.cpp
+    src/screens/equity_trading/EquityTradingScreen_Holdings.cpp
     src/screens/equity_trading/EquityTickerBar.cpp
     src/screens/equity_trading/EquityWatchlist.cpp
     src/screens/equity_trading/EquityChart.cpp
@@ -1603,7 +1762,11 @@ set_source_files_properties(
     src/screens/equity_trading/EquityBottomPanel.cpp
     src/screens/equity_trading/AccountManagementDialog.cpp
     src/screens/equity_trading/BroadcastOrderDialog.cpp
+    # DataSourcesScreen split; see DataSourcesScreen.cpp header.
     src/screens/data_sources/DataSourcesScreen.cpp
+    src/screens/data_sources/DataSourcesScreen_Layout.cpp
+    src/screens/data_sources/DataSourcesScreen_Tables.cpp
+    src/screens/data_sources/DataSourcesScreen_Handlers.cpp
     src/screens/data_sources/DataSourcesHelpers.cpp
     src/screens/data_sources/ConnectionConfigDialog.cpp
     src/screens/data_sources/ConnectionTester.cpp
@@ -1665,6 +1828,9 @@ set_source_files_properties(
     src/screens/dashboard/widgets/MaritimeVesselsWidget.cpp
     src/screens/dashboard/widgets/NotesWidget.cpp
     src/screens/data_mapping/DataMappingScreen.cpp
+    src/screens/data_mapping/DataMappingScreen_Data.cpp
+    src/screens/data_mapping/DataMappingScreen_Layout.cpp
+    src/screens/data_mapping/DataMappingScreen_Operations.cpp
     src/screens/crypto_center/CryptoCenterScreen.cpp
     src/screens/crypto_center/HoldingsBar.cpp
     src/screens/crypto_center/WalletActionConfirmDialog.cpp
@@ -1691,6 +1857,9 @@ set_source_files_properties(
     src/screens/dbnomics/DBnomicsScreen.cpp
     src/screens/dbnomics/DBnomicsSelectionPanel.cpp
     src/screens/docs/DocsScreen.cpp
+    src/screens/docs/DocsScreen_Pages_Intro.cpp
+    src/screens/docs/DocsScreen_Pages_Trading.cpp
+    src/screens/docs/DocsScreen_Pages_Data.cpp
     src/screens/derivatives/DerivativesScreen.cpp
     src/screens/fno/FnoScreen.cpp
     src/screens/fno/FnoHeaderBar.cpp
@@ -1761,11 +1930,15 @@ set_source_files_properties(
     src/screens/ma_analytics/MAAdvancedPanel.cpp
     src/screens/ma_analytics/MAComparisonPanel.cpp
     src/screens/maritime/MaritimeScreen.cpp
+    src/screens/maritime/MaritimeScreen_Layout.cpp
+    src/screens/maritime/MaritimeScreen_Handlers.cpp
     src/screens/markets/MarketPanel.cpp
     src/screens/markets/MarketPanelStore.cpp
     src/screens/markets/MarketPanelEditor.cpp
     src/screens/markets/MarketsScreen.cpp
     src/screens/mcp_servers/McpServersScreen.cpp
+    src/screens/mcp_servers/McpServersScreen_Layout.cpp
+    src/screens/mcp_servers/McpServersScreen_Actions.cpp
     src/screens/news/NewsCommandBar.cpp
     src/screens/news/NewsDetailPanel.cpp
     src/screens/news/NewsFeedDelegate.cpp
@@ -1774,6 +1947,8 @@ set_source_files_properties(
     src/screens/news/NewsScreen.cpp
     src/screens/news/NewsSidePanel.cpp
     src/screens/news/NewsTickerStrip.cpp
+    src/screens/news/dialogs/RssFeedManagerDialog.cpp
+    src/screens/news/dialogs/RssFeedEditDialog.cpp
     src/screens/node_editor/NodeEditorScreen.cpp
     src/screens/node_editor/canvas/EdgeItem.cpp
     src/screens/node_editor/canvas/MiniMap.cpp
@@ -1799,6 +1974,8 @@ set_source_files_properties(
     src/screens/portfolio/PortfolioOrderPanel.cpp
     src/screens/portfolio/PortfolioPerfChart.cpp
     src/screens/portfolio/PortfolioScreen.cpp
+    src/screens/portfolio/PortfolioScreen_Layout.cpp
+    src/screens/portfolio/PortfolioScreen_Handlers.cpp
     src/screens/portfolio/PortfolioTxnPanel.cpp
     src/screens/portfolio/PortfolioSectorPanel.cpp
     src/screens/portfolio/PortfolioSparkline.cpp
@@ -1820,6 +1997,8 @@ set_source_files_properties(
     src/screens/report_builder/DocumentCanvas.cpp
     src/screens/report_builder/PropertiesPanel.cpp
     src/screens/report_builder/ReportBuilderScreen.cpp
+    src/screens/report_builder/ReportBuilderScreen_Components.cpp
+    src/screens/report_builder/ReportBuilderScreen_Dialogs.cpp
     src/screens/settings/AppearanceSection.cpp
     src/screens/settings/CredentialsSection.cpp
     src/screens/settings/DataSourcesSection.cpp
@@ -1827,6 +2006,8 @@ set_source_files_properties(
     src/screens/settings/GeneralSection.cpp
     src/screens/settings/KeybindingsSection.cpp
     src/screens/settings/LlmConfigSection.cpp
+    src/screens/settings/LlmConfigSection_Providers.cpp
+    src/screens/settings/LlmConfigSection_Profiles.cpp
     src/screens/settings/LoggingSection.cpp
     src/screens/settings/McpServersSection.cpp
     src/screens/settings/NotificationsSection.cpp
@@ -1842,6 +2023,10 @@ set_source_files_properties(
     src/screens/support/SupportScreen.cpp
     src/screens/surface_analytics/Surface3DWidget.cpp
     src/screens/surface_analytics/SurfaceAnalyticsScreen.cpp
+    src/screens/surface_analytics/SurfaceAnalyticsScreen_Layout.cpp
+    src/screens/surface_analytics/SurfaceAnalyticsScreen_Views.cpp
+    src/screens/surface_analytics/SurfaceAnalyticsScreen_Handlers.cpp
+    src/screens/surface_analytics/SurfaceAnalyticsScreen_Providers.cpp
     src/screens/surface_analytics/SurfaceControlPanel.cpp
     src/screens/surface_analytics/SurfaceCsvImporter.cpp
     src/screens/surface_analytics/SurfaceDataInspector.cpp
@@ -1860,6 +2045,7 @@ set_source_files_properties(
     src/storage/repositories/McpServerRepository.cpp
     src/storage/repositories/NewsMonitorRepository.cpp
     src/storage/repositories/NewsArticleRepository.cpp
+    src/storage/repositories/RssFeedRepository.cpp
     src/storage/repositories/NotesRepository.cpp
     src/storage/repositories/PaperTradingRepository.cpp
     src/storage/repositories/PortfolioHoldingsRepository.cpp
@@ -1933,7 +2119,14 @@ set_source_files_properties(
 # exclude from unity to avoid ODR / symbol clashes in large batches
 set_source_files_properties(
     src/app/WindowFrame.cpp
+    src/app/WindowFrame_Setup.cpp
+    src/app/WindowFrame_Auth.cpp
+    src/app/WindowFrame_Layout.cpp
+    src/app/WindowFrame_Actions.cpp
     src/app/DockScreenRouter.cpp
+    src/app/DockScreenRouter_Navigation.cpp
+    src/app/DockScreenRouter_PanelOps.cpp
+    src/app/DockScreenRouter_Materialize.cpp
     src/app/TerminalShell.cpp
     PROPERTIES SKIP_UNITY_BUILD_INCLUSION TRUE
 )
@@ -1972,14 +2165,12 @@ set_source_files_properties(
     src/mcp/SchemaValidator.cpp
     src/mcp/ToolRetriever.cpp
     src/mcp/TerminalMcpBridge.cpp
-    src/mcp/dispatch/ToolDispatcher.cpp
-    src/mcp/dispatch/OpenAiAdapter.cpp
-    src/mcp/dispatch/AdapterFactory.cpp
     src/mcp/tools/NavigationTools.cpp
     src/mcp/tools/MarketsTools.cpp
     src/mcp/tools/WatchlistTools.cpp
     src/mcp/tools/NewsTools.cpp
     src/mcp/tools/NotesTools.cpp
+    src/mcp/tools/AgenticMemoryTools.cpp
     src/mcp/tools/FileManagerTools.cpp
     src/mcp/tools/AiChatTools.cpp
     src/mcp/tools/PortfolioTools.cpp
@@ -1994,7 +2185,27 @@ set_source_files_properties(
     src/mcp/tools/SettingsTools.cpp
     src/mcp/tools/PythonTools.cpp
     src/mcp/tools/SystemTools.cpp
+    src/mcp/tools/DataHubTools.cpp
+    src/mcp/tools/ReportBuilderTools.cpp
     src/mcp/tools/MetaTools.cpp
+    src/mcp/tools/McpServersTools.cpp
+    src/mcp/tools/QuantLabTools.cpp
+    src/mcp/tools/AgentsTools.cpp
+    src/mcp/tools/AgentsTools_Discovery.cpp
+    src/mcp/tools/AgentsTools_Execution.cpp
+    src/mcp/tools/AgentsTools_Repos.cpp
+    src/mcp/tools/DBnomicsTools.cpp
+    src/mcp/tools/GovDataTools.cpp
+    src/mcp/tools/EquityResearchTools.cpp
+    src/mcp/tools/WorkspaceTools.cpp
+    src/mcp/tools/WorkspaceTools_MonitorsWindows.cpp
+    src/mcp/tools/WorkspaceTools_Panels.cpp
+    src/mcp/tools/WorkspaceTools_LayoutsSnapshots.cpp
+    src/mcp/tools/WorkspaceTools_SymbolsActions.cpp
+    src/mcp/tools/DashboardTools.cpp
+    src/mcp/tools/GeopoliticsTools.cpp
+    src/mcp/tools/ExcelTools.cpp
+    src/mcp/tools/SurfaceAnalyticsTools.cpp
     PROPERTIES SKIP_UNITY_BUILD_INCLUSION TRUE
 )
 
@@ -2036,6 +2247,7 @@ set_source_files_properties(
     src/storage/repositories/McpServerRepository.cpp
     src/storage/repositories/NewsMonitorRepository.cpp
     src/storage/repositories/NewsArticleRepository.cpp
+    src/storage/repositories/RssFeedRepository.cpp
     src/storage/repositories/NotesRepository.cpp
     src/storage/repositories/PaperTradingRepository.cpp
     src/storage/repositories/PortfolioHoldingsRepository.cpp
@@ -2086,7 +2298,8 @@ add_executable(FinceptTerminal ${_FINCEPT_EXE_FLAGS}
     ${AUTH_SOURCES}
     ${STORAGE_SOURCES}
     ${PYTHON_SOURCES}
-    ${AI_CHAT_SOURCES}
+    ${LLM_SERVICE_SOURCES}
+    ${AI_CHAT_SCREEN_SOURCES}
     ${MCP_SOURCES}
     ${TRADING_SOURCES}
     ${SERVICE_SOURCES}
@@ -2099,6 +2312,53 @@ add_executable(FinceptTerminal ${_FINCEPT_EXE_FLAGS}
 
 target_include_directories(FinceptTerminal PRIVATE
     src
+)
+
+# ── Translations (.ts → .qm → resources) ──────────────────────────────────────
+# Hand-authored .ts files under translations/ are compiled to .qm at build time
+# (lrelease) and embedded in the Qt resource system at :/i18n/fincept_<locale>.qm.
+# LanguageManager loads them by that path at runtime. We deliberately use
+# qt6_add_lrelease (not qt6_add_translations) so lupdate never runs against the
+# source tree — the .ts files are the source of truth and must not be auto-
+# rewritten by scanning the C++. English is the source language; no .qm exists
+# for it and LanguageManager falls back to the in-source tr() literals.
+set(FINCEPT_TS_FILES
+    translations/fincept_zh_CN.ts
+    translations/fincept_zh_HK.ts
+    translations/fincept_id_ID.ts
+    translations/fincept_vi_VN.ts
+    translations/fincept_tr_TR.ts
+    translations/fincept_de_DE.ts
+    translations/fincept_pt_BR.ts
+    translations/fincept_es_ES.ts
+    translations/fincept_fr_FR.ts
+    translations/fincept_it_IT.ts
+)
+qt6_add_lrelease(FinceptTerminal
+    TS_FILES ${FINCEPT_TS_FILES}
+    QM_FILES_OUTPUT_VARIABLE FINCEPT_QM_FILES
+)
+qt6_add_resources(FinceptTerminal "fincept_i18n"
+    PREFIX "/i18n"
+    BASE "${CMAKE_CURRENT_BINARY_DIR}"
+    FILES ${FINCEPT_QM_FILES}
+)
+
+# ── Optional translator-refresh target (manual) ───────────────────────────────
+# Run with:
+#   cmake --build build/win-release --target update_translations
+# Scans the C++ source for tr() / QT_TRANSLATE_NOOP() calls and merges any
+# new strings into the .ts files as <translation type="unfinished"/>. Hand-
+# authored translations are preserved; only new source entries are appended.
+#
+# This target is intentionally NOT part of the default build — running it on
+# every compile would race with manual edits and clutter diffs. Contributors
+# invoke it on demand when they add new tr() calls.
+qt6_add_lupdate(FinceptTerminal
+    TS_FILES ${FINCEPT_TS_FILES}
+    LUPDATE_TARGET update_translations
+    NO_GLOBAL_TARGET
+    OPTIONS -no-obsolete -locations none
 )
 
 # ── macOS bundle properties ───────────────────────────────────────────────────
