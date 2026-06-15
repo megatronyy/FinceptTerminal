@@ -37,6 +37,47 @@ struct ProductTypeDef {
     trading::ProductType value;
 };
 
+// ============================================================================
+// estimate_order_margin — shared fallback margin estimator
+// Used by brokers that have no native pre-trade margin API (OpenAlgo's Python
+// raises NotImplementedError for these). Mirrors Phase 3 §5's heuristic:
+//   Intraday   → 20% (≈5x)
+//   Delivery   → 100% (full payment)
+//   Futures    → 10% (≈10x)
+//   Option buy → premium (full)
+//   Option sell→ 15% (SPAN estimate)
+//   default    → 20%
+// ============================================================================
+inline OrderMargin estimate_order_margin(const UnifiedOrder& order) {
+    const double trade_value = order.quantity * order.price;
+    OrderMargin m;
+    m.symbol = order.symbol;
+    m.exchange = order.exchange;
+    m.side = (order.side == OrderSide::Buy) ? "BUY" : "SELL";
+    m.quantity = order.quantity;
+    m.price = order.price;
+
+    const bool is_opt = order.symbol.endsWith("CE") || order.symbol.endsWith("PE");
+    const bool is_fut = order.symbol.contains("FUT");
+
+    if (order.product_type == ProductType::Intraday)
+        m.total = trade_value * 0.20; // ~5x
+    else if (order.product_type == ProductType::Delivery)
+        m.total = trade_value; // full payment
+    else if (is_fut)
+        m.total = trade_value * 0.10; // ~10x
+    else if (is_opt && order.side == OrderSide::Buy)
+        m.total = trade_value; // premium only
+    else if (is_opt)
+        m.total = trade_value * 0.15; // sell SPAN estimate
+    else
+        m.total = trade_value * 0.20;
+
+    m.cash = m.total;
+    m.leverage = (m.total > 0.0) ? trade_value / m.total : 1.0;
+    return m;
+}
+
 struct BrokerProfile {
     // Identity
     QString id;           // e.g. "alpaca"
@@ -68,6 +109,24 @@ struct BrokerProfile {
 };
 
 // ============================================================================
+// SessionCheck — result of a live token health-check (IBroker::validate_session)
+// ============================================================================
+// status:
+//   Valid        → token works right now
+//   Expired      → token is definitively dead/invalid (safe to disconnect/purge)
+//   Inconclusive → network/rate-limit/other; caller MUST leave state unchanged
+// expires_at_epoch: the broker's *real* reported expiry when it returns one
+//   (e.g. Dhan /v2/profile tokenValidity). 0 means unknown. On a Valid result
+//   AccountManager writes this back to storage so the persisted hint stops being
+//   stale.
+struct SessionCheck {
+    enum class Status { Valid, Expired, Inconclusive };
+    Status status = Status::Inconclusive;
+    qint64 expires_at_epoch = 0;
+    QString detail;
+};
+
+// ============================================================================
 // IBroker
 // ============================================================================
 
@@ -83,6 +142,36 @@ class IBroker {
     // --- Authentication ---
     virtual TokenExchangeResponse exchange_token(const QString& api_key, const QString& api_secret,
                                                  const QString& auth_code) = 0;
+
+    // --- Session validation (live token health-check) ---
+    // Issues a cheap authenticated call (default: get_funds) and classifies it
+    // into a SessionCheck. Brokers tag auth failures with the "[TOKEN_EXPIRED]"
+    // marker inside their checked_error()/*_check_auth() helpers; this default
+    // relies on that marker, so it works uniformly across every broker without a
+    // per-broker override. Override when the broker exposes a real expiry (so the
+    // persisted hint can be refreshed) or a cheaper dedicated endpoint.
+    virtual SessionCheck validate_session(const BrokerCredentials& creds) {
+        auto r = get_funds(creds);
+        if (r.success)
+            return {SessionCheck::Status::Valid, 0, QString()};
+        if (r.error.contains(QStringLiteral("[TOKEN_EXPIRED]")))
+            return {SessionCheck::Status::Expired, 0, r.error};
+        return {SessionCheck::Status::Inconclusive, 0, r.error};
+    }
+
+    // Whether this broker can obtain a fresh access token with no user
+    // interaction — either via a refresh token or by replaying a stored TOTP
+    // login. AccountManager only attempts refresh_session() when this is true.
+    virtual bool supports_silent_refresh() const { return false; }
+
+    // Attempt a silent token refresh from stored credentials. On success returns
+    // a populated TokenExchangeResponse (access_token [+ refresh_token] +
+    // additional_data carrying an updated "token_expires_at"). Default: not
+    // supported. Uses blocking HTTP internally — call from a worker thread only.
+    virtual TokenExchangeResponse refresh_session(const BrokerCredentials& creds) {
+        Q_UNUSED(creds);
+        return {false, QString(), QString(), QString(), QString(), QStringLiteral("Silent refresh not supported")};
+    }
 
     // --- Orders ---
     virtual OrderPlaceResponse place_order(const BrokerCredentials& creds, const UnifiedOrder& order) = 0;
@@ -275,6 +364,115 @@ class IBroker {
         Q_UNUSED(creds);
         Q_UNUSED(gtt_id);
         return {false, std::nullopt, "GTT not supported for this broker"};
+    }
+
+    // --- Bulk Operations (Phase 1: OpenAlgo bridge) ---
+
+    /// Cancel all open/pending orders. Default: fetch order book, cancel each open order.
+    virtual ApiResponse<CancelAllResult> cancel_all_orders(const BrokerCredentials& creds) {
+        CancelAllResult result;
+        auto orders_resp = get_orders(creds);
+        if (!orders_resp.success)
+            return {false, std::nullopt, orders_resp.error};
+        for (const auto& o : orders_resp.data.value_or(QVector<BrokerOrderInfo>{})) {
+            auto s = o.status.toLower();
+            if (s == "open" || s == "pending" || s == "new" || s == "trigger pending"
+                || s == "trigger_pending" || s == "ordered" || s == "transit"
+                || s == "accepted" || s == "partially_filled" || s == "working") {
+                result.total_attempted++;
+                auto r = cancel_order(creds, o.order_id);
+                if (r.success)
+                    result.canceled_order_ids.append(o.order_id);
+                else
+                    result.failed.append({o.order_id, r.error});
+            }
+        }
+        return {true, result, {}};
+    }
+
+    /// Close all open positions by placing market counter-orders.
+    virtual ApiResponse<CloseAllResult> close_all_positions(const BrokerCredentials& creds) {
+        CloseAllResult result;
+        auto pos_resp = get_positions(creds);
+        if (!pos_resp.success)
+            return {false, std::nullopt, pos_resp.error};
+        for (const auto& p : pos_resp.data.value_or(QVector<BrokerPosition>{})) {
+            if (p.quantity == 0) continue;
+            result.total_positions++;
+            UnifiedOrder counter;
+            counter.symbol = p.symbol;
+            counter.exchange = p.exchange;
+            counter.side = (p.quantity > 0) ? OrderSide::Sell : OrderSide::Buy;
+            counter.quantity = std::abs(p.quantity);
+            counter.order_type = OrderType::Market;
+            auto r = place_order(creds, counter);
+            if (r.success)
+                result.closed_symbols.append(p.symbol);
+            else
+                result.failed.append({p.symbol, r.error});
+        }
+        return {true, result, {}};
+    }
+
+    /// Close a single position by symbol/exchange/product.
+    virtual ApiResponse<OrderPlaceResponse> close_position(
+        const BrokerCredentials& creds,
+        const QString& symbol, const QString& exchange, const QString& product_type)
+    {
+        auto pos_resp = get_positions(creds);
+        if (!pos_resp.success)
+            return {false, std::nullopt, pos_resp.error};
+        for (const auto& p : pos_resp.data.value_or(QVector<BrokerPosition>{})) {
+            if (p.symbol == symbol && p.exchange == exchange
+                && (product_type.isEmpty() || p.product_type == product_type)
+                && p.quantity != 0) {
+                UnifiedOrder counter;
+                counter.symbol = p.symbol;
+                counter.exchange = p.exchange;
+                counter.side = (p.quantity > 0) ? OrderSide::Sell : OrderSide::Buy;
+                counter.quantity = std::abs(p.quantity);
+                counter.order_type = OrderType::Market;
+                auto opr = place_order(creds, counter);
+                if (!opr.success)
+                    return {false, std::nullopt, opr.error};
+                return {true, opr, ""};
+            }
+        }
+        return {false, std::nullopt, "Position not found"};
+    }
+
+    /// Batch quotes for multiple symbols. Default: sequential fallback.
+    virtual ApiResponse<QVector<BrokerQuote>> get_multi_quotes(
+        const BrokerCredentials& creds,
+        const QVector<QPair<QString, QString>>& symbols)
+    {
+        QVector<BrokerQuote> results;
+        for (const auto& [sym, exch] : symbols) {
+            auto r = get_quotes(creds, {sym});
+            if (r.success && r.data.has_value() && !r.data->isEmpty())
+                results.append(r.data->first());
+        }
+        return {true, results, {}};
+    }
+
+    /// Market depth (Level 2 bid/ask). Default: not supported.
+    virtual ApiResponse<MarketDepth> get_market_depth(
+        const BrokerCredentials& creds,
+        const QString& symbol, const QString& exchange)
+    {
+        Q_UNUSED(creds); Q_UNUSED(symbol); Q_UNUSED(exchange);
+        return {false, std::nullopt, "Market depth not supported for this broker"};
+    }
+
+    /// Option chain for an underlying. Default: not supported.
+    virtual ApiResponse<QVector<OptionChainEntry>> get_option_chain(
+        const BrokerCredentials& creds,
+        const QString& underlying, const QString& exchange,
+        const QString& expiry, int strike_count = 0)
+    {
+        Q_UNUSED(creds); Q_UNUSED(underlying); Q_UNUSED(exchange);
+        Q_UNUSED(expiry); Q_UNUSED(strike_count);
+        return {false, std::nullopt, "Option chain not supported for this broker"};
     }
 
     // --- WebSocket streaming ---

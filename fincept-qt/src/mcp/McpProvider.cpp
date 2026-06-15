@@ -118,6 +118,29 @@ std::optional<UnifiedTool> McpProvider::find_tool(const QString& name) const {
     return it.value();
 }
 
+std::vector<McpProvider::ToolAuditInfo> McpProvider::audit_all_tools() const {
+    QMutexLocker lock(&mutex_);
+    std::vector<ToolAuditInfo> result;
+    result.reserve(static_cast<std::size_t>(tools_.size()));
+    for (auto it = tools_.cbegin(); it != tools_.cend(); ++it) {
+        const ToolDef& def = it.value();
+        ToolAuditInfo info;
+        info.name = def.name;
+        info.category = def.category;
+        info.description = def.description;
+        // A std::function is truthy when a target is bound. async wins if both.
+        info.has_handler = static_cast<bool>(def.handler) || static_cast<bool>(def.async_handler);
+        info.is_async = static_cast<bool>(def.async_handler);
+        info.enabled = !disabled_tools_.contains(it.key());
+        info.is_destructive = def.is_destructive;
+        info.auth_required = def.auth_required;
+        info.input_schema = def.input_schema.to_json();
+        info.legacy_aliases = def.legacy_aliases;
+        result.push_back(std::move(info));
+    }
+    return result;
+}
+
 std::size_t McpProvider::tool_count() const {
     QMutexLocker lock(&mutex_);
     std::size_t count = 0;
@@ -154,7 +177,7 @@ QFuture<ToolResult> McpProvider::call_tool_async(const QString& name, const QJso
     ToolHandler sync_handler;
     AsyncToolHandler async_handler;
     ToolSchema schema;
-    int default_timeout_ms = 30000;
+    int default_timeout_ms = kMcpDefaultTimeoutMs;
     AuthLevel auth_required = AuthLevel::None;
     bool is_destructive = false;
 
@@ -263,7 +286,7 @@ QFuture<ToolResult> McpProvider::call_tool_async(const QString& name, const QJso
 
     // Per-call timeout overrides ToolDef::default_timeout_ms when supplied
     // (Phase 4 framework; Phase 6 wires _meta.timeout_ms here).
-    if (ctx.timeout_ms == 30000) // ToolContext default — not explicitly set
+    if (ctx.timeout_ms == kMcpDefaultTimeoutMs) // ToolContext default — not explicitly set
         ctx.timeout_ms = default_timeout_ms;
 
     // Async preferred; fall back to sync wrapped in an immediately-resolved
@@ -372,10 +395,9 @@ QPair<QString, QString> McpProvider::parse_openai_function_name(const QString& f
         return {fn_name.left(pos), decode_tool_name_from_wire(fn_name.mid(pos + 2))};
 
     // Fallback: some models (minimax, certain OpenRouter routes) drop the
-    // "<server>__" prefix and call the tool by its bare advertised name
-    // (e.g. "tool.list" instead of "fincept-terminal__tool-dot-list").
-    // Accept either the raw dotted form or the wire-encoded form if it
-    // matches a known internal tool — anything else is still rejected.
+    // "<server>__" prefix and call the tool by its bare advertised name.
+    // Accept either the raw form or the wire-encoded form if it matches
+    // a known internal tool — anything else is still rejected.
     if (!fn_name.isEmpty()) {
         const QString decoded = decode_tool_name_from_wire(fn_name);
         if (instance().has_tool(decoded))

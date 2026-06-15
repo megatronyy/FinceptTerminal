@@ -9,6 +9,7 @@
 #include "screens/settings/LlmConfigSection.h"
 
 #include "services/llm/LlmService.h"
+#include "services/llm/ProviderCatalog.h"
 #include "core/logging/Logger.h"
 #include "storage/repositories/LlmConfigRepository.h"
 #include "storage/repositories/LlmProfileRepository.h"
@@ -18,6 +19,7 @@
 
 #include <QFormLayout>
 #include <QFrame>
+#include <QHash>
 #include <QHBoxLayout>
 #include <QInputDialog>
 #include <QMessageBox>
@@ -26,83 +28,34 @@
 #include <QTimer>
 #include <QVBoxLayout>
 
+#include <algorithm>
 #include <memory>
 
 namespace fincept::screens {
 
-static constexpr const char* TAG = "LlmConfigSection";
+[[maybe_unused]] static constexpr const char* TAG = "LlmConfigSection";
 
 
-const QStringList LlmConfigSection::KNOWN_PROVIDERS = {"openai",  "anthropic", "gemini",   "groq",  "deepseek",
-                                                       "openrouter", "minimax", "kimi", "ollama", "xai",   "fincept"};
+const QStringList LlmConfigSection::KNOWN_PROVIDERS = fincept::ai_chat::ProviderCatalog::known_providers();
+
+QString LlmConfigSection::provider_display_name(const QString& provider_id) {
+    return fincept::ai_chat::ProviderCatalog::display_name(provider_id);
+}
+
+QStringList LlmConfigSection::providers_sorted() {
+    QStringList ids = KNOWN_PROVIDERS;
+    std::sort(ids.begin(), ids.end(), [](const QString& a, const QString& b) {
+        return provider_display_name(a).compare(provider_display_name(b), Qt::CaseInsensitive) < 0;
+    });
+    return ids;
+}
 
 QString LlmConfigSection::default_base_url(const QString& provider) {
-    const QString p = provider.toLower();
-    if (p == "openai")
-        return {}; // uses default
-    if (p == "anthropic")
-        return {};
-    if (p == "gemini")
-        return {};
-    if (p == "groq")
-        return {};
-    if (p == "deepseek")
-        return {};
-    if (p == "openrouter")
-        return {};
-    if (p == "minimax")
-        return "https://api.minimax.io/v1";
-    if (p == "kimi")
-        return {}; // defaults to https://api.moonshot.ai
-    if (p == "ollama")
-        return "http://localhost:11434";
-    if (p == "xai")
-        return {};
-    if (p == "fincept")
-        return {}; // endpoints are hardcoded in LlmService, no base_url needed
-    return {};
+    return fincept::ai_chat::ProviderCatalog::default_base_url(provider);
 }
 
 QStringList LlmConfigSection::fallback_models(const QString& provider) {
-    const QString p = provider.toLower();
-    if (p == "openai")
-        return {"gpt-4o", "gpt-4o-mini", "gpt-4-turbo", "o3-mini"};
-    if (p == "anthropic")
-        return {"claude-sonnet-4-5-20250514", "claude-opus-4-5", "claude-3-5-sonnet-20241022",
-                "claude-3-haiku-20240307"};
-    if (p == "gemini")
-        return {"gemini-2.5-flash", "gemini-2.5-pro", "gemini-2.0-flash"};
-    if (p == "groq")
-        return {"llama-3.3-70b-versatile", "mixtral-8x7b-32768", "gemma2-9b-it"};
-    if (p == "deepseek")
-        return {"deepseek-chat", "deepseek-reasoner"};
-    if (p == "openrouter")
-        return {"openai/gpt-4o", "anthropic/claude-sonnet-4-5", "google/gemini-2.5-flash"};
-    if (p == "minimax")
-        return {"MiniMax-M2.7", "MiniMax-M2.7-highspeed", "MiniMax-M2.5", "MiniMax-M2.5-highspeed"};
-    if (p == "kimi")
-        return {"moonshot-v1-auto",
-                "moonshot-v1-8k",
-                "moonshot-v1-32k",
-                "moonshot-v1-128k",
-                "kimi-k2.5",
-                "kimi-k2.6",
-                "kimi-k2-thinking",
-                "kimi-k2-thinking-turbo",
-                "kimi-k2-0905-preview",
-                "kimi-k2-turbo-preview",
-                "kimi-k2-0711-preview",
-                "moonshot-v1-8k-vision-preview",
-                "moonshot-v1-32k-vision-preview",
-                "moonshot-v1-128k-vision-preview"};
-    if (p == "ollama")
-        return {}; // Local provider — models fetched live from /api/tags. No fallback so the
-                   // combo only shows what the user actually has installed locally.
-    if (p == "xai")
-        return {"grok-4-latest", "grok-4", "grok-3", "grok-3-mini"};
-    if (p == "fincept")
-        return {"MiniMax-M2.7", "MiniMax-M2.7-highspeed", "MiniMax-M2.5", "MiniMax-M2.5-highspeed"};
-    return {};
+    return fincept::ai_chat::ProviderCatalog::fallback_models(provider);
 }
 
 // ============================================================================
@@ -141,9 +94,9 @@ void LlmConfigSection::build_ui() {
                              QString(ui::colors::BORDER_DIM()) + ";");
     auto* tbl = new QHBoxLayout(title_bar);
     tbl->setContentsMargins(16, 0, 16, 0);
-    auto* title_lbl = new QLabel(tr("LLM CONFIGURATION"));
-    title_lbl->setStyleSheet("color:" + QString(ui::colors::AMBER()) + ";font-weight:700;letter-spacing:1px;");
-    tbl->addWidget(title_lbl);
+    title_lbl_ = new QLabel(tr("LLM CONFIGURATION"));
+    title_lbl_->setStyleSheet("color:" + QString(ui::colors::AMBER()) + ";font-weight:700;letter-spacing:1px;");
+    tbl->addWidget(title_lbl_);
     tbl->addStretch();
     root->addWidget(title_bar);
 
@@ -161,8 +114,8 @@ void LlmConfigSection::build_ui() {
                                ";}"
                                "QTabBar::tab:hover{color:" +
                                QString(ui::colors::TEXT_PRIMARY()) + ";}");
-    tab_widget_->addTab(build_providers_tab(), "PROVIDERS");
-    tab_widget_->addTab(build_profiles_tab(), "PROFILES");
+    tab_widget_->addTab(build_providers_tab(), tr("PROVIDERS"));
+    tab_widget_->addTab(build_profiles_tab(), tr("PROFILES"));
     root->addWidget(tab_widget_, 1);
 }
 
@@ -176,7 +129,86 @@ void LlmConfigSection::show_status(const QString& msg, bool error) {
 }
 
 // ============================================================================
-// Profiles tab — builder
+// Retranslation — covers widgets built across all three TUs (this file +
+// LlmConfigSection_Providers.cpp + LlmConfigSection_Profiles.cpp). The split
+// TUs do not own a retranslateUi; this single override re-applies every fixed
+// label there.
 // ============================================================================
+
+void LlmConfigSection::changeEvent(QEvent* event) {
+    if (event->type() == QEvent::LanguageChange)
+        retranslateUi();
+    QWidget::changeEvent(event);
+}
+
+void LlmConfigSection::retranslateUi() {
+    // Title bar + tabs.
+    if (title_lbl_) title_lbl_->setText(tr("LLM CONFIGURATION"));
+    if (tab_widget_) {
+        tab_widget_->setTabText(0, tr("PROVIDERS"));
+        tab_widget_->setTabText(1, tr("PROFILES"));
+    }
+
+    // ── Providers tab ─────────────────────────────────────────────────────────
+    if (provider_list_title_) provider_list_title_->setText(tr("Providers"));
+    if (add_btn_)             add_btn_->setText(tr("+ Add"));
+    if (delete_btn_)          delete_btn_->setText(tr("Remove"));
+
+    if (form_title_)          form_title_->setText(tr("Provider Configuration"));
+    if (provider_field_lbl_)  provider_field_lbl_->setText(tr("Provider"));
+    if (api_key_field_lbl_)   api_key_field_lbl_->setText(tr("API Key"));
+    if (model_field_lbl_)     model_field_lbl_->setText(tr("Model"));
+    if (base_url_field_lbl_)  base_url_field_lbl_->setText(tr("Base URL"));
+
+    if (provider_edit_)       provider_edit_->setPlaceholderText(tr("e.g. openai"));
+    if (model_combo_ && model_combo_->lineEdit())
+        model_combo_->lineEdit()->setPlaceholderText(tr("Select or type model..."));
+    if (base_url_edit_)       base_url_edit_->setPlaceholderText(tr("Optional — leave empty for default"));
+
+    if (fetch_btn_) fetch_btn_->setText(tr("Fetch"));
+    if (tools_check_) {
+        tools_check_->setText(tr("Enable MCP Tools (navigation, market data, portfolio, etc.)"));
+        tools_check_->setToolTip(tr("When enabled, the AI can interact with the terminal: navigate screens, fetch market "
+                                    "data, manage watchlists, etc."));
+    }
+    if (save_btn_) save_btn_->setText(tr("Save & Set Active"));
+    if (test_btn_) test_btn_->setText(tr("Test Connection"));
+
+    // Global settings panel.
+    if (global_title_)      global_title_->setText(tr("GLOBAL SETTINGS"));
+    if (temp_lbl_)          temp_lbl_->setText(tr("Temperature"));
+    if (tokens_lbl_)        tokens_lbl_->setText(tr("Max Tokens"));
+    if (tool_rounds_lbl_) {
+        tool_rounds_lbl_->setText(tr("Max Tool Rounds"));
+        tool_rounds_lbl_->setToolTip(tr("Ceiling on tool-call rounds per chat turn. Default 40.\n"
+                                        "Range 1-200. Raise for long workflows (e.g. populating multi-section reports)."));
+    }
+    if (system_prompt_lbl_) system_prompt_lbl_->setText(tr("System Prompt"));
+    if (system_prompt_)     system_prompt_->setPlaceholderText(tr("Optional system prompt for the LLM..."));
+    if (save_global_btn_)   save_global_btn_->setText(tr("Save Global Settings"));
+
+    // ── Profiles tab ──────────────────────────────────────────────────────────
+    if (profile_list_title_) profile_list_title_->setText(tr("PROFILES"));
+    if (profile_list_hint_)  profile_list_hint_->setText(tr("A profile = named LLM config you can assign to any agent or team."));
+    if (profile_add_btn_)    profile_add_btn_->setText(tr("+ New"));
+    if (profile_delete_btn_) profile_delete_btn_->setText(tr("Delete"));
+
+    if (profile_name_field_lbl_)     profile_name_field_lbl_->setText(tr("PROFILE NAME"));
+    if (profile_provider_field_lbl_) profile_provider_field_lbl_->setText(tr("PROVIDER"));
+    if (profile_model_field_lbl_)    profile_model_field_lbl_->setText(tr("MODEL"));
+    if (profile_api_key_field_lbl_)  profile_api_key_field_lbl_->setText(tr("API KEY"));
+    if (profile_base_url_field_lbl_) profile_base_url_field_lbl_->setText(tr("BASE URL (custom endpoint)"));
+    if (profile_temp_field_lbl_)     profile_temp_field_lbl_->setText(tr("TEMPERATURE"));
+    if (profile_tokens_field_lbl_)   profile_tokens_field_lbl_->setText(tr("MAX TOKENS"));
+    if (profile_prompt_field_lbl_)   profile_prompt_field_lbl_->setText(tr("SYSTEM PROMPT OVERRIDE (optional)"));
+
+    if (profile_name_edit_)     profile_name_edit_->setPlaceholderText(tr("e.g. Fast Groq, Careful Claude, Coding minimax"));
+    if (profile_api_key_edit_)  profile_api_key_edit_->setPlaceholderText(tr("Leave blank to inherit from provider"));
+    if (profile_base_url_edit_) profile_base_url_edit_->setPlaceholderText(tr("Leave blank to use provider default"));
+    if (profile_prompt_edit_)   profile_prompt_edit_->setPlaceholderText(tr("Leave blank to use global system prompt"));
+
+    if (profile_save_btn_)    profile_save_btn_->setText(tr("SAVE PROFILE"));
+    if (profile_default_btn_) profile_default_btn_->setText(tr("SET AS DEFAULT"));
+}
 
 } // namespace fincept::screens

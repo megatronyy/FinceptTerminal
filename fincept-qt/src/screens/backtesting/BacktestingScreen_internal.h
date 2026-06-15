@@ -10,19 +10,62 @@
 
 #pragma once
 
+#include "core/currency/Currency.h"
 #include "services/backtesting/BacktestingTypes.h"
 
+#include <QComboBox>
+#include <QCoreApplication>
+#include <QDoubleSpinBox>
+#include <QEvent>
 #include <QJsonValue>
 #include <QLayout>
 #include <QLayoutItem>
 #include <QRegularExpression>
 #include <QSizePolicy>
+#include <QSpinBox>
 #include <QString>
 #include <QWidget>
 
 #include <cmath>
 
 namespace fincept::screens::backtesting_internal {
+
+// Event filter that blocks mouse-wheel changes on unfocused combo boxes and
+// spin boxes. Without this, scrolling through the config panel accidentally
+// changes every widget the cursor passes over.
+class WheelGuard : public QObject {
+  public:
+    using QObject::QObject;
+
+  protected:
+    bool eventFilter(QObject* obj, QEvent* event) override {
+        if (event->type() == QEvent::Wheel) {
+            auto* w = qobject_cast<QWidget*>(obj);
+            if (w && !w->hasFocus()) {
+                event->ignore();
+                return true;
+            }
+        }
+        return QObject::eventFilter(obj, event);
+    }
+};
+
+// Apply the wheel guard to a widget: StrongFocus so it only gains focus on
+// click, plus the event filter to swallow wheel events when unfocused.
+inline void guard_wheel(QWidget* w, QObject* filter) {
+    w->setFocusPolicy(Qt::StrongFocus);
+    w->installEventFilter(filter);
+}
+
+// Walk a widget tree and guard every QComboBox / QSpinBox / QDoubleSpinBox.
+inline void guard_all_inputs(QWidget* root, QObject* filter) {
+    for (auto* combo : root->findChildren<QComboBox*>())
+        guard_wheel(combo, filter);
+    for (auto* spin : root->findChildren<QSpinBox*>())
+        guard_wheel(spin, filter);
+    for (auto* dspin : root->findChildren<QDoubleSpinBox*>())
+        guard_wheel(dspin, filter);
+}
 
 // Shared pill geometry used by every chip on the top bar (brand, provider
 // tabs, RUN, status) and by update_provider_buttons() when re-skinning the
@@ -65,7 +108,8 @@ inline QString fmt_metric(const QString& key, const QJsonValue& val) {
     if (val.isString())
         return val.toString();
     if (val.isBool())
-        return val.toBool() ? "YES" : "NO";
+        return val.toBool() ? QCoreApplication::translate("BacktestingScreen", "YES")
+                            : QCoreApplication::translate("BacktestingScreen", "NO");
     if (!val.isDouble())
         return QString::fromUtf8("—");
 
@@ -86,13 +130,10 @@ inline QString fmt_metric(const QString& key, const QJsonValue& val) {
     if (ratio_metric_keys().contains(key))
         return QString::number(v, 'f', std::abs(v) >= 10.0 ? 2 : 4);
 
-    // Currency-like large values
-    if (std::abs(v) >= 1e9)
-        return QString("$%1B").arg(v / 1e9, 0, 'f', 1);
-    if (std::abs(v) >= 1e6)
-        return QString("$%1M").arg(v / 1e6, 0, 'f', 1);
+    // Currency-like large values — follow the preferred currency (backtest
+    // capital/equity is user-denominated, not market data).
     if (std::abs(v) >= 1e3)
-        return QString("$%1K").arg(v / 1e3, 0, 'f', 0);
+        return cur::money(v, /*compact=*/true);
 
     return QString::number(v, 'f', 4);
 }

@@ -123,17 +123,39 @@ QVariant OptionChainModel::data(const QModelIndex& index, int role) const {
 QVariant OptionChainModel::headerData(int section, Qt::Orientation orient, int role) const {
     if (orient != Qt::Horizontal || role != Qt::DisplayRole)
         return {};
-    static const char* kHeaders[ColCount] = {
-        "OI",   "Chg OI", "Volume", "IV",   "LTP",
-        "Strike",
-        "LTP",  "IV",     "Volume", "Chg OI", "OI",
+    // tr() per-call so the live header row reflects the current language.
+    // The owning QHeaderView re-polls headerData on QEvent::LanguageChange.
+    const QString headers[ColCount] = {
+        tr("OI"),   tr("Chg OI"), tr("Volume"), tr("IV"),   tr("LTP"),
+        tr("Strike"),
+        tr("LTP"),  tr("IV"),     tr("Volume"), tr("Chg OI"), tr("OI"),
     };
     if (section < 0 || section >= ColCount)
         return {};
-    return QString::fromLatin1(kHeaders[section]);
+    return headers[section];
 }
 
 void OptionChainModel::set_chain(const OptionChain& chain) {
+    // When the strike/token structure is unchanged (same expiry republished —
+    // e.g. a WS-driven live re-publish or a periodic reconcile), merge in place
+    // and repaint instead of resetting the model. A full reset would drop the
+    // user's scroll position and selection on every refresh; this keeps them.
+    bool same_structure = chain.rows.size() == chain_.rows.size() && !chain_.rows.isEmpty();
+    if (same_structure) {
+        for (int i = 0; i < chain.rows.size(); ++i) {
+            if (chain.rows[i].ce_token != chain_.rows[i].ce_token ||
+                chain.rows[i].pe_token != chain_.rows[i].pe_token) {
+                same_structure = false;
+                break;
+            }
+        }
+    }
+    if (same_structure) {
+        chain_ = chain;
+        recompute_oi_bounds();
+        emit dataChanged(index(0, 0), index(chain_.rows.size() - 1, ColCount - 1));
+        return;
+    }
     beginResetModel();
     chain_ = chain;
     recompute_oi_bounds();

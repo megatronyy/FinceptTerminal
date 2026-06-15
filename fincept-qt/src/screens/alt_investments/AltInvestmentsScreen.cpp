@@ -13,6 +13,7 @@
 #include "storage/cache/CacheManager.h"
 #include "ui/theme/Theme.h"
 
+#include <QCoreApplication>
 #include <QFrame>
 #include <QHBoxLayout>
 #include <QJsonArray>
@@ -32,73 +33,73 @@ static const QString kStyle =
     QStringLiteral("#altScreen { background: %1; }"
 
                    "#altHeader { background: %2; border-bottom: 2px solid %3; padding: 0 16px; }"
-                   "#altHeaderTitle { color: %4; font-size: 13px; font-weight: 700; background: transparent; }"
-                   "#altHeaderSub   { color: %5; font-size: 9px; letter-spacing: 0.8px; background: transparent; }"
-                   "#altHeaderBadge { color: %6; font-size: 8px; font-weight: 700; letter-spacing: 0.5px;"
+                   "#altHeaderTitle { color: %4; font-size: 15px; font-weight: 700; background: transparent; }"
+                   "#altHeaderSub   { color: %5; font-size: 11px; letter-spacing: 0.8px; background: transparent; }"
+                   "#altHeaderBadge { color: %6; font-size: 10px; font-weight: 700; letter-spacing: 0.5px;"
                    "  background: rgba(22,163,74,0.18); border: 1px solid rgba(22,163,74,0.4); padding: 2px 8px; }"
 
                    "#altLeftPanel { background: %7; border-right: 1px solid %8; }"
-                   "#altLeftTitle  { color: %5; font-size: 9px; font-weight: 700; letter-spacing: 0.8px;"
+                   "#altLeftTitle  { color: %5; font-size: 11px; font-weight: 700; letter-spacing: 0.8px;"
                    "  background: %2; padding: 8px 12px; border-bottom: 1px solid %8; }"
                    "#altCatBtn { background: transparent; color: %5; border: none; border-bottom: 1px solid %8;"
-                   "  text-align: left; font-size: 11px; padding: 9px 14px; }"
+                   "  text-align: left; font-size: 13px; padding: 9px 14px; }"
                    "#altCatBtn:hover { color: %4; background: %12; }"
                    "#altCatBtn[active=\"true\"] { color: %3; font-weight: 700;"
                    "  background: rgba(217,119,6,0.08); border-left: 3px solid %3; padding-left: 11px; }"
 
                    "#altCenterPanel { background: %1; }"
                    "#altCenterTitleBar { background: %2; border-bottom: 1px solid %8; }"
-                   "#altCenterTitle { color: %4; font-size: 12px; font-weight: 700; background: transparent; }"
-                   "#altCenterDesc  { color: %5; font-size: 10px; background: transparent; }"
-                   "#altComboLabel  { color: %5; font-size: 9px; font-weight: 700;"
+                   "#altCenterTitle { color: %4; font-size: 14px; font-weight: 700; background: transparent; }"
+                   "#altCenterDesc  { color: %5; font-size: 12px; background: transparent; }"
+                   "#altComboLabel  { color: %5; font-size: 11px; font-weight: 700;"
                    "  letter-spacing: 0.5px; background: transparent; }"
 
                    "#altFormPanel  { background: %7; border: 1px solid %8; }"
                    "#altFormHeader { background: %2; border-bottom: 1px solid %8; padding: 0 12px; }"
-                   "#altFormTitle  { color: %4; font-size: 10px; font-weight: 700; background: transparent; }"
-                   "#altFieldLabel { color: %5; font-size: 9px; font-weight: 700;"
+                   "#altFormTitle  { color: %4; font-size: 12px; font-weight: 700; background: transparent; }"
+                   "#altFieldLabel { color: %5; font-size: 11px; font-weight: 700;"
                    "  letter-spacing: 0.5px; background: transparent; }"
 
                    "QLineEdit { background: %1; color: %4; border: 1px solid %8;"
-                   "  padding: 5px 8px; font-size: 11px; }"
+                   "  padding: 5px 8px; font-size: 13px; }"
                    "QLineEdit:focus { border-color: %9; }"
                    "QDoubleSpinBox { background: %1; color: %4; border: 1px solid %8;"
-                   "  padding: 5px 8px; font-size: 11px; }"
+                   "  padding: 5px 8px; font-size: 13px; }"
                    "QDoubleSpinBox:focus { border-color: %9; }"
                    "QDoubleSpinBox::up-button, QDoubleSpinBox::down-button { width: 0; }"
                    "QComboBox { background: %1; color: %4; border: 1px solid %8;"
-                   "  padding: 5px 8px; font-size: 11px; }"
+                   "  padding: 5px 8px; font-size: 13px; }"
                    "QComboBox::drop-down { border: none; width: 18px; }"
                    "QComboBox QAbstractItemView { background: %2; color: %4; border: 1px solid %8;"
                    "  selection-background-color: %3; selection-color: %1; outline: none; }"
 
                    "#altAnalyzeBtn { background: %3; color: %1; border: none; padding: 7px 20px;"
-                   "  font-size: 10px; font-weight: 700; letter-spacing: 0.5px; }"
+                   "  font-size: 12px; font-weight: 700; letter-spacing: 0.5px; }"
                    "#altAnalyzeBtn:hover    { background: #FF8800; }"
                    "#altAnalyzeBtn:disabled { background: %10; color: %11; }"
 
                    "#altRightPanel { background: %7; border-left: 1px solid %8; }"
-                   "#altRightTitle { color: %5; font-size: 9px; font-weight: 700; letter-spacing: 0.8px;"
+                   "#altRightTitle { color: %5; font-size: 11px; font-weight: 700; letter-spacing: 0.8px;"
                    "  background: %2; padding: 8px 12px; border-bottom: 1px solid %8; }"
-                   "#altVerdictBadge  { font-size: 11px; font-weight: 700; padding: 4px 14px;"
+                   "#altVerdictBadge  { font-size: 13px; font-weight: 700; padding: 4px 14px;"
                    "  letter-spacing: 0.5px; }"
-                   "#altVerdictRating { color: %13; font-size: 14px; font-weight: 700; background: transparent; }"
-                   "#altVerdictRec    { color: %4; font-size: 10px; background: transparent; }"
+                   "#altVerdictRating { color: %13; font-size: 16px; font-weight: 700; background: transparent; }"
+                   "#altVerdictRec    { color: %4; font-size: 12px; background: transparent; }"
 
                    "#altMetricRow     { background: transparent; border-bottom: 1px solid %8; }"
-                   "#altMetricKey     { color: %5; font-size: 10px; background: transparent; }"
-                   "#altMetricVal     { color: %13; font-size: 10px; font-weight: 700; background: transparent; }"
-                   "#altMetricSection { color: %3; font-size: 9px; font-weight: 700; letter-spacing: 0.8px;"
+                   "#altMetricKey     { color: %5; font-size: 12px; background: transparent; }"
+                   "#altMetricVal     { color: %13; font-size: 12px; font-weight: 700; background: transparent; }"
+                   "#altMetricSection { color: %3; font-size: 11px; font-weight: 700; letter-spacing: 0.8px;"
                    "  background: %2; padding: 4px 10px; border-top: 1px solid %8; }"
-                   "#altMetricBullet    { color: %5;  font-size: 10px; background: transparent; }"
-                   "#altMetricBulletVal { color: %4;  font-size: 10px; background: transparent; }"
-                   "#altMetricWarn      { color: #FFD700; font-size: 10px; background: transparent; }"
-                   "#altMetricGood      { color: %6;  font-size: 10px; background: transparent; }"
-                   "#altMetricBad       { color: %14; font-size: 10px; background: transparent; }"
+                   "#altMetricBullet    { color: %5;  font-size: 12px; background: transparent; }"
+                   "#altMetricBulletVal { color: %4;  font-size: 12px; background: transparent; }"
+                   "#altMetricWarn      { color: #FFD700; font-size: 12px; background: transparent; }"
+                   "#altMetricGood      { color: %6;  font-size: 12px; background: transparent; }"
+                   "#altMetricBad       { color: %14; font-size: 12px; background: transparent; }"
 
                    "#altStatusBar  { background: %2; border-top: 1px solid %8; }"
-                   "#altStatusText { color: %5; font-size: 9px; background: transparent; }"
-                   "#altStatusHigh { color: %13; font-size: 9px; background: transparent; }"
+                   "#altStatusText { color: %5; font-size: 11px; background: transparent; }"
+                   "#altStatusHigh { color: %13; font-size: 11px; background: transparent; }"
 
                    "QSplitter::handle { background: %8; }"
                    "QScrollBar:vertical { background: %1; width: 5px; border: none; }"
@@ -165,100 +166,106 @@ static AltField combo_field(const QString& key, const QString& label, const QStr
 
 // ── Category definitions ─────────────────────────────────────────────────────
 
+// Translation helper for the data-driven category/analyzer display strings.
+// (These tables live in free static functions, so QObject::tr is unavailable.)
+static QString alt_tr(const char* s) {
+    return QCoreApplication::translate("AltInvestmentsScreen", s);
+}
+
 static QList<AltCategory> build_categories() {
     return {
         {"bonds",
-         "Bonds & Fixed Income",
+         alt_tr("Bonds & Fixed Income"),
          "#3B82F6",
          "B",
          {
-             {"high-yield", "High-Yield Bonds", "Spread analysis, default probability, equity-like behavior"},
-             {"em-bonds", "Emerging Market Bonds", "Yield spread, sovereign default risk, currency risk"},
-             {"convertible-bonds", "Convertible Bonds", "Conversion premium, bond floor, upside participation"},
-             {"preferred-stocks", "Preferred Stocks", "Current yield, call risk, dividend safety analysis"},
+             {"high-yield", alt_tr("High-Yield Bonds"), alt_tr("Spread analysis, default probability, equity-like behavior")},
+             {"em-bonds", alt_tr("Emerging Market Bonds"), alt_tr("Yield spread, sovereign default risk, currency risk")},
+             {"convertible-bonds", alt_tr("Convertible Bonds"), alt_tr("Conversion premium, bond floor, upside participation")},
+             {"preferred-stocks", alt_tr("Preferred Stocks"), alt_tr("Current yield, call risk, dividend safety analysis")},
          }},
         {"real_estate",
-         "Real Estate",
+         alt_tr("Real Estate"),
          "#8B5CF6",
          "RE",
          {
-             {"real-estate", "Direct Property / REIT", "NOI, cap rate, DCF valuation, financing analysis"},
+             {"real-estate", alt_tr("Direct Property / REIT"), alt_tr("NOI, cap rate, DCF valuation, financing analysis")},
          }},
         {"hedge_funds",
-         "Hedge Funds",
+         alt_tr("Hedge Funds"),
          "#EAB308",
          "HF",
          {
-             {"hedge-funds", "Long/Short Equity", "Strategy metrics, fee impact, liquidity risk"},
-             {"managed-futures", "Managed Futures / CTA", "Fee drag, trend following, crisis alpha analysis"},
-             {"market-neutral", "Market Neutral", "Beta neutrality, factor exposure, leverage risk"},
+             {"hedge-funds", alt_tr("Long/Short Equity"), alt_tr("Strategy metrics, fee impact, liquidity risk")},
+             {"managed-futures", alt_tr("Managed Futures / CTA"), alt_tr("Fee drag, trend following, crisis alpha analysis")},
+             {"market-neutral", alt_tr("Market Neutral"), alt_tr("Beta neutrality, factor exposure, leverage risk")},
          }},
         {"commodities",
-         "Commodities",
+         alt_tr("Commodities"),
          "#F97316",
          "C",
          {
-             {"natural-resources", "Natural Resources", "Futures basis, contango/backwardation, roll yield"},
-             {"pme", "Precious Metals Equities", "Correlation to metals, inflation hedge, drawdowns"},
+             {"natural-resources", alt_tr("Natural Resources"), alt_tr("Futures basis, contango/backwardation, roll yield")},
+             {"pme", alt_tr("Precious Metals Equities"), alt_tr("Correlation to metals, inflation hedge, drawdowns")},
          }},
         {"private_capital",
-         "Private Capital",
+         alt_tr("Private Capital"),
          "#EC4899",
          "PE",
          {
-             {"private-capital", "Private Equity / Venture Capital", "IRR, MOIC, DPI, RVPI, J-curve, fee drag"},
+             {"private-capital", alt_tr("Private Equity / Venture Capital"), alt_tr("IRR, MOIC, DPI, RVPI, J-curve, fee drag")},
          }},
         {"annuities",
-         "Annuities",
+         alt_tr("Annuities"),
          "#22C55E",
          "AN",
          {
-             {"annuities", "Fixed Annuity", "Payout analysis, breakeven years, inflation erosion"},
-             {"variable-annuities", "Variable Annuity", "Total fee drag, tax deferral myth, vs. alternatives"},
-             {"eia", "Equity-Indexed Annuity", "Crediting rate, upside cap limitations, surrender charges"},
-             {"inflation-annuity", "Inflation-Indexed Annuity",
-              "vs. fixed annuity, vs. TIPS ladder, longevity break-even"},
+             {"annuities", alt_tr("Fixed Annuity"), alt_tr("Payout analysis, breakeven years, inflation erosion")},
+             {"variable-annuities", alt_tr("Variable Annuity"), alt_tr("Total fee drag, tax deferral myth, vs. alternatives")},
+             {"eia", alt_tr("Equity-Indexed Annuity"), alt_tr("Crediting rate, upside cap limitations, surrender charges")},
+             {"inflation-annuity", alt_tr("Inflation-Indexed Annuity"),
+              alt_tr("vs. fixed annuity, vs. TIPS ladder, longevity break-even")},
          }},
         {"structured",
-         "Structured Products",
+         alt_tr("Structured Products"),
          "#06B6D4",
          "SP",
          {
-             {"structured-products", "Structured Notes", "Complexity score, hidden costs, issuer credit risk"},
-             {"leveraged-funds", "Leveraged ETFs (2x/3x)", "Volatility decay, path-dependency, holding cost"},
+             {"structured-products", alt_tr("Structured Notes"), alt_tr("Complexity score, hidden costs, issuer credit risk")},
+             {"leveraged-funds", alt_tr("Leveraged ETFs (2x/3x)"), alt_tr("Volatility decay, path-dependency, holding cost")},
          }},
         {"inflation",
-         "Inflation Protected",
+         alt_tr("Inflation Protected"),
          "#FB923C",
          "IP",
          {
-             {"tips", "TIPS — Inflation-Linked Treasuries", "Real yield, inflation scenarios, tax efficiency"},
-             {"ibonds", "I-Bonds — Series I Savings Bonds", "Composite rate, early redemption penalty, vs. TIPS"},
-             {"stable-value", "Stable Value Funds", "Market-to-book ratio, crediting rate, wrap contract risk"},
+             {"tips", alt_tr("TIPS — Inflation-Linked Treasuries"), alt_tr("Real yield, inflation scenarios, tax efficiency")},
+             {"ibonds", alt_tr("I-Bonds — Series I Savings Bonds"), alt_tr("Composite rate, early redemption penalty, vs. TIPS")},
+             {"stable-value", alt_tr("Stable Value Funds"), alt_tr("Market-to-book ratio, crediting rate, wrap contract risk")},
          }},
         {"strategies",
-         "Strategies & Analysis",
+         alt_tr("Strategies & Analysis"),
          "#67E8F9",
          "ST",
          {
-             {"covered-calls", "Covered Call Strategy", "Tax consequences, opportunity cost, premium income"},
-             {"sri", "SRI / ESG Funds", "Performance vs. benchmark, screening costs, approaches"},
-             {"asset-location", "Tax-Efficient Asset Location",
-              "Optimal account placement, muni bonds, annual tax drag"},
+             {"covered-calls", alt_tr("Covered Call Strategy"), alt_tr("Tax consequences, opportunity cost, premium income")},
+             {"sri", alt_tr("SRI / ESG Funds"), alt_tr("Performance vs. benchmark, screening costs, approaches")},
+             {"asset-location", alt_tr("Tax-Efficient Asset Location"),
+              alt_tr("Optimal account placement, muni bonds, annual tax drag")},
          }},
         {"crypto",
-         "Digital Assets",
+         alt_tr("Digital Assets"),
          "#F87171",
          "DA",
          {
-             {"digital-assets", "Cryptocurrency", "Fundamental metrics, NVT ratio, market cap analysis"},
+             {"digital-assets", alt_tr("Cryptocurrency"), alt_tr("Fundamental metrics, NVT ratio, market cap analysis")},
          }},
     };
 }
 
 // ── Per-analyzer form fields ─────────────────────────────────────────────────
 
-static QList<AltField> fields_for(const QString& id) {
+[[maybe_unused]] static QList<AltField> fields_for(const QString& id) {
     if (id == "high-yield")
         return {
             text_field("name", "BOND NAME", "HY Corp Bond"),
@@ -470,12 +477,41 @@ void AltInvestmentsScreen::hideEvent(QHideEvent* e) {
     QWidget::hideEvent(e);
 }
 
+// ── Live language switch ─────────────────────────────────────────────────────
+void AltInvestmentsScreen::changeEvent(QEvent* e) {
+    if (e->type() == QEvent::LanguageChange)
+        retranslateUi();
+    QWidget::changeEvent(e);
+}
+
+void AltInvestmentsScreen::retranslateUi() {
+    // Fixed chrome labels
+    if (header_title_)  header_title_->setText(tr("ALTERNATIVE INVESTMENTS"));
+    if (header_sub_)    header_sub_->setText(tr("27 ANALYZERS  \xB7  10 ASSET CLASSES  \xB7  MULTI-ASSET ANALYTICS"));
+    if (header_badge_)  header_badge_->setText(tr("PYTHON ANALYTICS ENGINE"));
+    if (left_title_)    left_title_->setText(tr("ASSET CLASSES"));
+    if (combo_label_)   combo_label_->setText(tr("ANALYZER"));
+    if (form_title_)    form_title_->setText(tr("INPUT PARAMETERS"));
+    if (right_title_)   right_title_->setText(tr("ANALYSIS RESULTS"));
+    if (status_left_)   status_left_->setText(tr("ALTERNATIVE INVESTMENTS"));
+    if (analyze_btn_ && !loading_) analyze_btn_->setText(tr("ANALYZE"));
+
+    // Rebuild the data-driven category/analyzer labels (they were translated at
+    // construction); re-apply to the left buttons + combo + center via the
+    // normal selection path so the active category/analyzer text refreshes too.
+    categories_ = build_categories();
+    for (int i = 0; i < cat_btns_.size() && i < categories_.size(); ++i)
+        cat_btns_[i]->setText(categories_[i].name);
+    if (active_category_ >= 0 && active_category_ < categories_.size())
+        on_category_changed(active_category_);
+}
+
 // ── UI Setup ─────────────────────────────────────────────────────────────────
 
 
 QString AltInvestmentsScreen::format_value(const QJsonValue& v) const {
     if (v.isBool())
-        return v.toBool() ? "Yes" : "No";
+        return v.toBool() ? tr("Yes") : tr("No");
     if (v.isNull())
         return "\u2014";
     if (v.isString())
@@ -501,9 +537,9 @@ QString AltInvestmentsScreen::format_value(const QJsonValue& v) const {
 }
 
 void AltInvestmentsScreen::display_error(const QString& error) {
-    verdict_badge_->setText("ERROR");
+    verdict_badge_->setText(tr("ERROR"));
     verdict_badge_->setStyleSheet(QString("color:%1; background:rgba(220,38,38,0.15);"
-                                          " font-size:11px; font-weight:700; padding:4px 14px;")
+                                          " font-size:13px; font-weight:700; padding:4px 14px;")
                                       .arg(colors::NEGATIVE()));
     verdict_rating_->clear();
     verdict_rec_->setText(error);
@@ -520,7 +556,7 @@ void AltInvestmentsScreen::display_error(const QString& error) {
 void AltInvestmentsScreen::set_loading(bool loading) {
     loading_ = loading;
     analyze_btn_->setEnabled(!loading);
-    analyze_btn_->setText(loading ? "ANALYZING..." : "ANALYZE");
+    analyze_btn_->setText(loading ? tr("ANALYZING...") : tr("ANALYZE"));
 }
 
 // ── IStatefulScreen ──────────────────────────────────────────────────────────

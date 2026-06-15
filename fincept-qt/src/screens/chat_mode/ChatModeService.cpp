@@ -1,6 +1,7 @@
 #include "screens/chat_mode/ChatModeService.h"
 
 #include "auth/AuthManager.h"
+#include "core/config/AppConfig.h"
 #include "core/logging/Logger.h"
 
 #include <QDateTime>
@@ -12,8 +13,6 @@
 #include <QUrlQuery>
 
 namespace fincept::chat_mode {
-
-static constexpr const char* API_BASE = "https://api.fincept.in";
 
 // ── Singleton ─────────────────────────────────────────────────────────────────
 
@@ -30,7 +29,7 @@ ChatModeService::ChatModeService(QObject* parent) : QObject(parent) {
 // ── Auth helpers ──────────────────────────────────────────────────────────────
 
 QString ChatModeService::base_url() const {
-    return QString::fromLatin1(API_BASE);
+    return fincept::AppConfig::instance().api_base_url();
 }
 
 QString ChatModeService::api_key() const {
@@ -81,7 +80,7 @@ void ChatModeService::handle_reply(QNetworkReply* reply,
         if (status == 402) {
             LOG_WARN("ChatModeService", "Insufficient credits (402)");
             emit insufficient_credits();
-            cb(false, {}, "Insufficient credits");
+            cb(false, {}, tr("Insufficient credits"));
             return;
         }
 
@@ -357,14 +356,14 @@ void ChatModeService::optimize_prompt(const QString& prompt, const QString& mode
         reply->deleteLater();
 
         if (net_err != QNetworkReply::NoError && net_err != QNetworkReply::OperationCanceledError) {
-            cb(false, {}, "Optimize prompt request failed");
+            cb(false, {}, tr("Optimize prompt request failed"));
             return;
         }
 
         QJsonParseError pe;
         QJsonDocument doc = QJsonDocument::fromJson(data, &pe);
         if (pe.error != QJsonParseError::NoError) {
-            cb(false, {}, "JSON parse error");
+            cb(false, {}, tr("JSON parse error"));
             return;
         }
 
@@ -435,19 +434,19 @@ void ChatModeService::agent_chat(const QString& query, const QString& session_id
 
         if (status == 402) {
             emit insufficient_credits();
-            cb(false, {}, "Insufficient credits");
+            cb(false, {}, tr("Insufficient credits"));
             return;
         }
 
         if (net_err != QNetworkReply::NoError && net_err != QNetworkReply::OperationCanceledError) {
-            cb(false, {}, "Agent chat request failed");
+            cb(false, {}, tr("Agent chat request failed"));
             return;
         }
 
         QJsonParseError pe;
         QJsonDocument doc = QJsonDocument::fromJson(data, &pe);
         if (pe.error != QJsonParseError::NoError) {
-            cb(false, {}, "JSON parse error");
+            cb(false, {}, tr("JSON parse error"));
             return;
         }
 

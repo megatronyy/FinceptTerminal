@@ -21,6 +21,7 @@
 
 #include "services/options/OptionChainTypes.h"
 
+#include <QEvent>
 #include <QLabel>
 #include <QString>
 #include <QStringList>
@@ -37,6 +38,8 @@ class ChainSubTab : public QWidget {
   public:
     explicit ChainSubTab(QWidget* parent = nullptr);
     ~ChainSubTab() override;
+
+    OptionChainTable* table() const { return table_; }
 
     // Lightweight save/restore for the F&O screen aggregator.
     QVariantMap save_state() const;
@@ -55,14 +58,19 @@ class ChainSubTab : public QWidget {
   protected:
     void showEvent(QShowEvent* e) override;
     void hideEvent(QHideEvent* e) override;
+    void changeEvent(QEvent* event) override;
 
   private slots:
     void on_broker_changed(const QString& broker_id);
     void on_underlying_changed(const QString& underlying);
     void on_expiry_changed(const QString& expiry);
     void on_refresh_clicked();
+    /// Right-click Buy/Sell on a chain leg → build a 1-lot market order, confirm,
+    /// and route to the connected broker (live or paper per its trading mode).
+    void on_order_requested(qint64 token, double strike, bool is_call, bool is_buy);
 
   private:
+    void retranslateUi();
     void rebuild_picker_for_broker(const QString& broker_id, bool keep_selection);
     void rebuild_expiries_for_underlying(const QString& broker_id, const QString& underlying,
                                          bool keep_selection);
@@ -79,6 +87,10 @@ class ChainSubTab : public QWidget {
 
     /// Topic we're currently subscribed to. Empty when not subscribed.
     QString active_topic_;
+
+    /// Per-leg live-tick pattern we're subscribed to (`option:tick:<broker>:*`),
+    /// used to patch single cells from the WS feed. Empty when not subscribed.
+    QString tick_pattern_;
 
     /// Whether the widget is currently visible — gates re-subscribe paths
     /// triggered by combo changes from non-visible state.

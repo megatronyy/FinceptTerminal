@@ -28,6 +28,7 @@ Instrument InstrumentRepository::map_row(QSqlQuery& q) {
     i.instrument_type = parse_instrument_type(q.value(10).toString());
     i.tick_size = q.value(11).toDouble();
     i.broker_id = q.value(12).toString();
+    i.broker_token = q.value(13).toString();
     return i;
 }
 
@@ -53,24 +54,32 @@ fincept::Result<void> InstrumentRepository::replace_all(const QString& broker_id
     // Bulk insert — one prepared statement, many binds
     const QString sql = "INSERT OR IGNORE INTO instruments "
                         "(instrument_token, exchange_token, symbol, brsymbol, name, exchange, brexchange, "
-                        " expiry, strike, lot_size, instrument_type, tick_size, broker_id) "
-                        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)";
+                        " expiry, strike, lot_size, instrument_type, tick_size, broker_id, broker_token) "
+                        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)";
+
+    // A default-constructed QString is *null*, and QtSql binds a null QString as
+    // SQL NULL. Every text column here is NOT NULL, so a null bind (e.g. an unset
+    // broker_token, which numeric-token brokers like Fyers never populate) makes
+    // INSERT OR IGNORE silently drop the row — the whole catalog vanishes while the
+    // transaction still "succeeds". Coalesce nulls to "" so the row persists.
+    auto nn = [](const QString& s) { return s.isNull() ? QStringLiteral("") : s; };
 
     for (const auto& inst : instruments) {
         auto ri = exec_write(sql, {
                                       inst.instrument_token,
                                       inst.exchange_token,
-                                      inst.symbol,
-                                      inst.brsymbol,
-                                      inst.name,
-                                      inst.exchange,
-                                      inst.brexchange,
-                                      inst.expiry,
+                                      nn(inst.symbol),
+                                      nn(inst.brsymbol),
+                                      nn(inst.name),
+                                      nn(inst.exchange),
+                                      nn(inst.brexchange),
+                                      nn(inst.expiry),
                                       inst.strike,
                                       inst.lot_size,
                                       QString(instrument_type_str(inst.instrument_type)),
                                       inst.tick_size,
                                       broker_id,
+                                      nn(inst.broker_token),
                                   });
         if (ri.is_err()) {
             db().rollback();
@@ -84,7 +93,23 @@ fincept::Result<void> InstrumentRepository::replace_all(const QString& broker_id
         return rc2;
     }
 
-    LOG_INFO("InstrumentRepo", QString("Replaced %1 instruments for %2").arg(instruments.size()).arg(broker_id));
+    // Verify the write actually persisted on the same connection. INSERT OR IGNORE
+    // returns success even when every row is dropped, so a "successful" commit can
+    // still leave the table empty. Surface that loudly — but do NOT fail the
+    // refresh: the caller still builds the in-memory cache from `instruments`,
+    // which is what powers symbol search and resolution this session.
+    const int persisted = count(broker_id);
+    if (persisted == 0 && !instruments.isEmpty()) {
+        LOG_ERROR("InstrumentRepo",
+                  QString("replace_all persisted 0 rows for %1 despite %2 parsed instruments — "
+                          "commit succeeded but nothing landed on disk (in-memory cache still used)")
+                      .arg(broker_id)
+                      .arg(instruments.size()));
+    } else {
+        LOG_INFO("InstrumentRepo",
+                 QString("Replaced %1 instruments for %2 (verified %3 rows persisted)")
+                     .arg(instruments.size()).arg(broker_id).arg(persisted));
+    }
     return fincept::Result<void>::ok();
 }
 
@@ -97,14 +122,14 @@ fincept::Result<void> InstrumentRepository::clear(const QString& broker_id) {
 std::optional<Instrument> InstrumentRepository::find(const QString& symbol, const QString& exchange,
                                                      const QString& broker_id) const {
     return query_optional("SELECT instrument_token, exchange_token, symbol, brsymbol, name, exchange, brexchange, "
-                          "expiry, strike, lot_size, instrument_type, tick_size, broker_id "
+                          "expiry, strike, lot_size, instrument_type, tick_size, broker_id, broker_token "
                           "FROM instruments WHERE symbol = ? AND exchange = ? AND broker_id = ? LIMIT 1",
                           {symbol, exchange, broker_id}, map_row);
 }
 
 std::optional<Instrument> InstrumentRepository::find_by_token(qint64 instrument_token, const QString& broker_id) const {
     return query_optional("SELECT instrument_token, exchange_token, symbol, brsymbol, name, exchange, brexchange, "
-                          "expiry, strike, lot_size, instrument_type, tick_size, broker_id "
+                          "expiry, strike, lot_size, instrument_type, tick_size, broker_id, broker_token "
                           "FROM instruments WHERE instrument_token = ? AND broker_id = ? LIMIT 1",
                           {instrument_token, broker_id}, map_row);
 }
@@ -112,7 +137,7 @@ std::optional<Instrument> InstrumentRepository::find_by_token(qint64 instrument_
 std::optional<Instrument> InstrumentRepository::find_by_brsymbol(const QString& brsymbol, const QString& brexchange,
                                                                  const QString& broker_id) const {
     return query_optional("SELECT instrument_token, exchange_token, symbol, brsymbol, name, exchange, brexchange, "
-                          "expiry, strike, lot_size, instrument_type, tick_size, broker_id "
+                          "expiry, strike, lot_size, instrument_type, tick_size, broker_id, broker_token "
                           "FROM instruments WHERE brsymbol = ? AND brexchange = ? AND broker_id = ? LIMIT 1",
                           {brsymbol, brexchange, broker_id}, map_row);
 }
@@ -120,8 +145,10 @@ std::optional<Instrument> InstrumentRepository::find_by_brsymbol(const QString& 
 QVector<Instrument> InstrumentRepository::search(const QString& query, const QString& exchange,
                                                  const QString& broker_id, int limit) const {
     QString pattern = "%" + query.toUpper() + "%";
+    // Exchange is stored upper-case; normalise the filter so "nse" matches. Empty = any.
+    const QString exch = exchange.toUpper();
     QString sql = "SELECT instrument_token, exchange_token, symbol, brsymbol, name, exchange, brexchange, "
-                  "expiry, strike, lot_size, instrument_type, tick_size, broker_id "
+                  "expiry, strike, lot_size, instrument_type, tick_size, broker_id, broker_token "
                   "FROM instruments "
                   "WHERE broker_id = ? "
                   "AND (exchange = ? OR ? = '') "
@@ -129,7 +156,49 @@ QVector<Instrument> InstrumentRepository::search(const QString& query, const QSt
                   "ORDER BY CASE instrument_type "
                   "  WHEN 'EQ' THEN 0 WHEN 'INDEX' THEN 1 WHEN 'FUT' THEN 2 ELSE 3 END, symbol "
                   "LIMIT ?";
-    auto r = db().execute(sql, {broker_id, exchange, exchange, pattern, pattern, pattern, limit});
+    auto r = db().execute(sql, {broker_id, exch, exch, pattern, pattern, pattern, limit});
+    if (r.is_err())
+        return {};
+    QVector<Instrument> results;
+    auto& q = r.value();
+    while (q.next())
+        results.append(map_row(q));
+    return results;
+}
+
+QVector<Instrument> InstrumentRepository::search_all(const QString& query, const QString& exchange,
+                                                     const QStringList& broker_ids, int limit) const {
+    const QString pattern = "%" + query.toUpper() + "%";
+    // Exchange stored upper-case; normalise the filter. Empty = any exchange.
+    const QString exch = exchange.toUpper();
+
+    QString sql = "SELECT instrument_token, exchange_token, symbol, brsymbol, name, exchange, brexchange, "
+                  "expiry, strike, lot_size, instrument_type, tick_size, broker_id, broker_token "
+                  "FROM instruments "
+                  "WHERE (exchange = ? OR ? = '') "
+                  "AND (UPPER(symbol) LIKE ? OR UPPER(brsymbol) LIKE ? OR UPPER(name) LIKE ?) ";
+    QVariantList params = {exch, exch, pattern, pattern, pattern};
+
+    // Scope to the connected brokers. Empty list = all brokers in the catalog.
+    if (!broker_ids.isEmpty()) {
+        QStringList placeholders;
+        for (const QString& b : broker_ids) {
+            placeholders << "?";
+            params.append(b);
+        }
+        sql += "AND broker_id IN (" + placeholders.join(",") + ") ";
+    }
+
+    // Active broker (first in the list) sorts first, then by type, symbol, broker.
+    const QString active = broker_ids.isEmpty() ? QString() : broker_ids.first();
+    sql += "ORDER BY CASE WHEN broker_id = ? THEN 0 ELSE 1 END, "
+           "CASE instrument_type WHEN 'EQ' THEN 0 WHEN 'INDEX' THEN 1 WHEN 'FUT' THEN 2 ELSE 3 END, "
+           "symbol, broker_id "
+           "LIMIT ?";
+    params.append(active);
+    params.append(limit);
+
+    auto r = db().execute(sql, params);
     if (r.is_err())
         return {};
     QVector<Instrument> results;
@@ -142,7 +211,7 @@ QVector<Instrument> InstrumentRepository::search(const QString& query, const QSt
 QVector<Instrument> InstrumentRepository::list(const QString& exchange, const QString& broker_id,
                                                InstrumentType type) const {
     QString sql = "SELECT instrument_token, exchange_token, symbol, brsymbol, name, exchange, brexchange, "
-                  "expiry, strike, lot_size, instrument_type, tick_size, broker_id "
+                  "expiry, strike, lot_size, instrument_type, tick_size, broker_id, broker_token "
                   "FROM instruments WHERE exchange = ? AND broker_id = ?";
     QVariantList params = {exchange, broker_id};
     if (type != InstrumentType::UNKNOWN) {
@@ -166,6 +235,18 @@ int InstrumentRepository::count(const QString& broker_id) const {
         return 0;
     auto& q = r.value();
     return q.next() ? q.value(0).toInt() : 0;
+}
+
+QDateTime InstrumentRepository::last_updated(const QString& broker_id) const {
+    auto r = db().execute("SELECT MAX(updated_at) FROM instruments WHERE broker_id = ?", {broker_id});
+    if (r.is_err())
+        return {};
+    auto& q = r.value();
+    if (!q.next() || q.value(0).isNull())
+        return {};
+    QDateTime dt = QDateTime::fromString(q.value(0).toString(), "yyyy-MM-dd HH:mm:ss");
+    dt.setTimeZone(QTimeZone::UTC); // updated_at is written as datetime('now') (UTC)
+    return dt;
 }
 
 } // namespace fincept::trading

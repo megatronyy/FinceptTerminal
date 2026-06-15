@@ -2,6 +2,8 @@
 
 #include "services/llm/LlmService.h"
 
+#include "auth/AuthManager.h"
+#include "core/config/AppConfig.h"
 #include "core/logging/Logger.h"
 #include "storage/repositories/SettingsRepository.h"
 
@@ -67,7 +69,9 @@ QString LlmService::get_models_url(const QString& provider, const QString& api_k
     if (p == "openrouter") return "https://openrouter.ai/api/v1/models";
     if (p == "xai")     return "https://api.x.ai/v1/models";
     if (p == "kimi")    return "https://api.moonshot.ai/v1/models";
-    if (p == "fincept") return "https://api.fincept.in/research/llm/models";
+    if (p == "aihubmix") return "https://aihubmix.com/v1/models"; // fallback if prefilled base_url was cleared
+    if (p == "atlascloud") return "https://api.atlascloud.ai/v1/models"; // fallback if prefilled base_url was cleared
+    if (p == "fincept") return fincept::AppConfig::instance().api_base_url() + "/research/llm/models";
     // minimax has no public /v1/models — caller falls back to known models.
     return {};
 }
@@ -86,13 +90,11 @@ QMap<QString, QString> LlmService::get_models_headers(const QString& provider, c
     } else if (p == "ollama") {
         // No auth.
     } else if (p == "fincept") {
-        // Same fallback as ensure_config.
+        // Same fallback as ensure_config — resolve via AuthManager
+        // (session → SecureStorage), never the plaintext settings row (CR-08).
         QString resolved_key = api_key;
-        if (resolved_key.isEmpty()) {
-            auto stored = SettingsRepository::instance().get("fincept_api_key");
-            if (stored.is_ok() && !stored.value().isEmpty())
-                resolved_key = stored.value();
-        }
+        if (resolved_key.isEmpty())
+            resolved_key = fincept::auth::AuthManager::instance().fincept_api_key();
         if (!resolved_key.isEmpty())
             h["X-API-Key"] = resolved_key;
     } else {

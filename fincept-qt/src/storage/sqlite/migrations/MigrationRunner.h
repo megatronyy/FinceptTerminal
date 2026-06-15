@@ -78,5 +78,24 @@ void register_migration_v028();
 void register_migration_v029();
 void register_migration_v030();
 void register_migration_v031();
+void register_migration_v032();
+void register_migration_v033();
+void register_migration_v034();
+void register_migration_v035();
+void register_migration_v036();
+void register_migration_v037();
+void register_migration_v038();
+void register_migration_v039();
+void register_migration_v040();
+void register_migration_v041();
+void register_migration_v042();
+void register_migration_v043();
+void register_migration_v044();
+void register_migration_v045();
+void register_migration_v046();
+void register_migration_v047();
+void register_migration_v048();
+void register_migration_v049();
+void register_migration_v050();
 
 } // namespace fincept

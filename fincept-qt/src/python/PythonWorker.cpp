@@ -46,6 +46,18 @@ PythonWorker::PythonWorker() {
             proc_->kill();
         }
     });
+
+    connect(&PythonRunner::instance(), &PythonRunner::python_ready, this, [this]() {
+        ensure_started();
+    });
+
+    connect(&PythonSetupManager::instance(), &PythonSetupManager::setup_complete, this, [this](bool success, const QString& /*error*/) {
+        if (success) {
+            LOG_INFO("PythonWorker", "Python/Venv setup completed successfully. Resetting restart budget and starting daemon.");
+            restart_count_ = 0;
+            ensure_started();
+        }
+    });
 }
 
 PythonWorker::~PythonWorker() {

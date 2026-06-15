@@ -9,7 +9,10 @@
 #include <QFrame>
 #include <QHBoxLayout>
 #include <QHideEvent>
+#include <QIcon>
 #include <QPainter>
+#include <QPainterPath>
+#include <QPixmap>
 #include <QStackedWidget>
 #include <QVBoxLayout>
 
@@ -46,6 +49,60 @@ static QString btn_primary() {
                    "QPushButton:disabled { color: %4; background: %5; border-color: %6; }")
         .arg(ui::colors::AMBER(), ui::colors::AMBER_DIM(), ui::colors::BG_BASE(), ui::colors::TEXT_DIM(), ui::colors::BG_RAISED(),
              ui::colors::BORDER_DIM());
+}
+
+// White "Continue with Google" button — high contrast against the dark theme,
+// matching Google's own button styling (white surface, dark text, hairline border).
+static QString btn_google() {
+    return QString("QPushButton {"
+                   "  background: #ffffff; color: #3c4043;"
+                   "  border: 1px solid #dadce0; border-radius: 2px;"
+                   "  padding: 0 16px; font-size: 14px; font-weight: 700;"
+                   "  font-family: 'Consolas','Courier New',monospace;"
+                   "}"
+                   "QPushButton:hover { background: #f5f6f7; border-color: #c6c8ca; }"
+                   "QPushButton:disabled { background: %1; color: %2; border-color: %3; }")
+        .arg(ui::colors::BG_RAISED(), ui::colors::TEXT_DIM(), ui::colors::BORDER_DIM());
+}
+
+// Render the multi-colour Google "G" with QPainter (no QtSvg / asset dependency).
+// Super-sampled 2× for crisp edges on both retina and non-retina displays.
+static QPixmap google_g_pixmap(int logical_px) {
+    constexpr qreal dpr = 2.0;
+    const qreal s = logical_px * dpr;
+    QPixmap pm(static_cast<int>(s), static_cast<int>(s));
+    pm.fill(Qt::transparent);
+
+    QPainter p(&pm);
+    p.setRenderHint(QPainter::Antialiasing, true);
+
+    const QColor blue(0x42, 0x85, 0xF4), red(0xEA, 0x43, 0x35), yellow(0xFB, 0xBC, 0x05), green(0x34, 0xA8, 0x53);
+    const qreal w = s * 0.22; // ring thickness
+    const qreal margin = w / 2.0 + s * 0.04;
+    const QRectF ring(margin, margin, s - 2 * margin, s - 2 * margin);
+
+    QPen pen;
+    pen.setWidthF(w);
+    pen.setCapStyle(Qt::FlatCap);
+    auto arc = [&](const QColor& c, int start_deg, int span_deg) {
+        pen.setColor(c);
+        p.setPen(pen);
+        p.drawArc(ring, start_deg * 16, span_deg * 16); // Qt angles: 0°=east, CCW positive
+    };
+    arc(blue, -20, 110);  // right → top
+    arc(red, 90, 60);     // top → upper-left
+    arc(yellow, 150, 70); // upper-left → lower-left
+    arc(green, 220, 90);  // lower-left → bottom (gap 310°–340° = the G's mouth)
+
+    // Blue crossbar (the "tongue") — from centre to the right inner edge at mid-height.
+    p.setPen(Qt::NoPen);
+    p.setBrush(blue);
+    const qreal cy = s / 2.0;
+    p.drawRect(QRectF(s / 2.0, cy - w / 2.0, ring.right() - s / 2.0, w));
+
+    p.end();
+    pm.setDevicePixelRatio(dpr);
+    return pm;
 }
 
 static QString btn_standard() {
@@ -142,22 +199,22 @@ LoginScreen::LoginScreen(QWidget* parent) : QWidget(parent) {
     connect(&auth, &auth::AuthManager::login_active_session, this, &LoginScreen::on_active_session);
     connect(&auth, &auth::AuthManager::mfa_verified, this, &LoginScreen::on_mfa_verified);
     connect(&auth, &auth::AuthManager::mfa_failed, this, &LoginScreen::on_mfa_failed);
+    connect(&auth, &auth::AuthManager::logged_out, this, [this]() {
+        if (email_input_) email_input_->clear();
+        if (password_input_) {
+            password_input_->clear();
+            password_input_->setEchoMode(QLineEdit::Password);
+        }
+        if (mfa_input_) mfa_input_->clear();
+        clear_error();
+        if (mfa_error_) mfa_error_->hide();
+        if (pages_) pages_->setCurrentIndex(0);
+    });
 }
 
 // ── Background Paint ─────────────────────────────────────────────────────────
 
 void LoginScreen::hideEvent(QHideEvent* event) {
-    // Wipe credential + MFA inputs whenever this screen leaves the stack so
-    // they can't be recovered or pre-filled after a logout/navigation.
-    if (email_input_) email_input_->clear();
-    if (password_input_) {
-        password_input_->clear();
-        password_input_->setEchoMode(QLineEdit::Password);
-    }
-    if (mfa_input_) mfa_input_->clear();
-    clear_error();
-    if (mfa_error_) mfa_error_->hide();
-    if (pages_) pages_->setCurrentIndex(0);
     QWidget::hideEvent(event);
 }
 
@@ -293,6 +350,25 @@ void LoginScreen::build_login_page() {
     connect(login_btn_, &QPushButton::clicked, this, &LoginScreen::on_login);
     brl->addWidget(login_btn_);
     vl->addWidget(btn_row);
+
+    // ── "or" divider + Google sign-in ───────────────────────────────────────
+    or_lbl_ = new QLabel;
+    or_lbl_->setAlignment(Qt::AlignCenter);
+    or_lbl_->setStyleSheet(muted_style());
+    vl->addWidget(or_lbl_);
+
+    google_btn_ = new QPushButton;
+    google_btn_->setFixedHeight(38);
+    google_btn_->setStyleSheet(btn_google());
+    google_btn_->setIcon(QIcon(google_g_pixmap(18)));
+    google_btn_->setIconSize(QSize(18, 18));
+    google_btn_->setCursor(Qt::PointingHandCursor);
+    connect(google_btn_, &QPushButton::clicked, this, [this]() {
+        clear_error();
+        set_loading(true);
+        auth::AuthManager::instance().login_with_google();
+    });
+    vl->addWidget(google_btn_);
 
     vl->addWidget(make_separator());
 
@@ -482,6 +558,8 @@ void LoginScreen::retranslateUi() {
     }
     if (forgot_btn_)      forgot_btn_->setText(tr("FORGOT PASSWORD?"));
     if (login_btn_)       login_btn_->setText(tr("  SIGN IN  "));
+    if (or_lbl_)          or_lbl_->setText(tr("or"));
+    if (google_btn_)      google_btn_->setText(tr("CONTINUE WITH GOOGLE"));
     if (no_account_lbl_)  no_account_lbl_->setText(tr("No account?"));
     if (signup_btn_)      signup_btn_->setText(tr("SIGN UP"));
 
@@ -541,6 +619,14 @@ void LoginScreen::on_force_login() {
 
 void LoginScreen::on_login_succeeded() {
     set_loading(false);
+    if (email_input_) email_input_->clear();
+    if (password_input_) {
+        password_input_->clear();
+        password_input_->setEchoMode(QLineEdit::Password);
+    }
+    if (mfa_input_) mfa_input_->clear();
+    clear_error();
+    if (mfa_error_) mfa_error_->hide();
     pages_->setCurrentIndex(0);
     for (auto* b : conflict_page_->findChildren<QPushButton*>())
         b->setEnabled(true);
@@ -598,6 +684,10 @@ void LoginScreen::set_loading(bool loading) {
     email_input_->setEnabled(!loading);
     password_input_->setEnabled(!loading);
     login_btn_->setText(loading ? tr("  SIGNING IN...  ") : tr("  SIGN IN  "));
+    if (google_btn_) {
+        google_btn_->setEnabled(!loading);
+        google_btn_->setText(loading ? tr("WAITING FOR BROWSER…") : tr("CONTINUE WITH GOOGLE"));
+    }
 }
 
 } // namespace fincept::screens

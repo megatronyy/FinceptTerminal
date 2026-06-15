@@ -8,6 +8,7 @@
 #include <QComboBox>
 #include <QDateEdit>
 #include <QDoubleSpinBox>
+#include <QEvent>
 #include <QHideEvent>
 #include <QJsonObject>
 #include <QLabel>
@@ -49,6 +50,7 @@ class BacktestingScreen : public QWidget, public IStatefulScreen, public IGroupL
   protected:
     void showEvent(QShowEvent* event) override;
     void hideEvent(QHideEvent* event) override;
+    void changeEvent(QEvent* event) override;
 
   private slots:
     void on_provider_changed(int index);
@@ -81,6 +83,43 @@ class BacktestingScreen : public QWidget, public IStatefulScreen, public IGroupL
     void clear_results();
     QJsonObject gather_args();
     QJsonObject gather_strategy_params();
+    /// Re-apply tr() strings to cached structural widgets on QEvent::LanguageChange.
+    void retranslateUi();
+
+    // ── Cached static labels for retranslateUi ──────────────────────────────
+    // Top bar
+    QLabel* brand_label_ = nullptr;
+    // Left panel section/field titles
+    QLabel* commands_title_ = nullptr;
+    QLabel* strategy_title_ = nullptr;
+    QLabel* strategy_cat_label_ = nullptr;
+    QLabel* strategy_pick_label_ = nullptr;
+    QLabel* params_title_ = nullptr;
+    // Center panel
+    QLabel* results_title_ = nullptr;
+    QPushButton* export_json_btn_ = nullptr;
+    QLabel* summary_hint_ = nullptr;
+    QLabel* equity_hint_ = nullptr;
+    // Right panel section/field titles
+    QLabel* market_data_title_ = nullptr;
+    QLabel* symbols_label_ = nullptr;
+    QLabel* start_label_ = nullptr;
+    QLabel* end_label_ = nullptr;
+    QLabel* interval_label_ = nullptr;
+    QLabel* execution_title_ = nullptr;
+    QLabel* commission_label_ = nullptr;
+    QLabel* slippage_label_ = nullptr;
+    QLabel* risk_free_label_ = nullptr;
+    QLabel* advanced_title_ = nullptr;
+    QLabel* leverage_label_ = nullptr;
+    QLabel* stop_loss_label_ = nullptr;
+    QLabel* take_profit_label_ = nullptr;
+    QLabel* pos_sizing_label_ = nullptr;
+    QLabel* benchmark_title_ = nullptr;
+    QLabel* benchmark_label_ = nullptr;
+    // Status bar
+    QLabel* providers_caption_ = nullptr;
+    QLabel* strategies_caption_ = nullptr;
 
     // Provider state (cached to avoid repeated heap allocation)
     QVector<services::backtest::Provider> providers_;
@@ -122,15 +161,19 @@ class BacktestingScreen : public QWidget, public IStatefulScreen, public IGroupL
 
     // Right panel - config
     QLineEdit* symbols_edit_ = nullptr;
+    QComboBox* interval_combo_ = nullptr;
     QDoubleSpinBox* capital_spin_ = nullptr;
     QDateEdit* start_date_ = nullptr;
     QDateEdit* end_date_ = nullptr;
     QDoubleSpinBox* commission_spin_ = nullptr;
     QDoubleSpinBox* slippage_spin_ = nullptr;
+    QDoubleSpinBox* risk_free_spin_ = nullptr;
     QDoubleSpinBox* leverage_spin_ = nullptr;
     QDoubleSpinBox* stop_loss_spin_ = nullptr;
     QDoubleSpinBox* take_profit_spin_ = nullptr;
     QComboBox* pos_sizing_combo_ = nullptr;
+    QDoubleSpinBox* pos_sizing_value_spin_ = nullptr;
+    QLabel* pos_sizing_value_label_ = nullptr;
     QCheckBox* allow_short_check_ = nullptr;
     QLineEdit* benchmark_edit_ = nullptr;
 
@@ -263,6 +306,7 @@ class BacktestingScreen : public QWidget, public IStatefulScreen, public IGroupL
 
     // Center - results
     QTabWidget* result_tabs_ = nullptr;
+    QWidget* equity_chart_tab_ = nullptr;
     QVBoxLayout* summary_layout_ = nullptr;
     QWidget* summary_container_ = nullptr;
     QTableWidget* metrics_table_ = nullptr;
@@ -270,8 +314,28 @@ class BacktestingScreen : public QWidget, public IStatefulScreen, public IGroupL
     QTextEdit* raw_json_edit_ = nullptr;
     QLabel* status_label_ = nullptr;
 
+    // Custom combo strategy builder (up to 3 indicators)
+    struct ComboIndicatorRow {
+        QComboBox* type = nullptr;
+        QComboBox* cond = nullptr;
+        QDoubleSpinBox* val = nullptr;
+        QSpinBox* period = nullptr;
+    };
+    ComboIndicatorRow combo_rows_[3] = {};
+    QComboBox* combo_logic_ = nullptr;
+    QCheckBox* combo_ind3_enabled_ = nullptr;
+
+    void apply_portfolio_config(const QJsonObject& config);
+    /// Dispatch a run on the next event-loop tick. Used by the auto-run path so
+    /// freshly-populated strategy combos/params settle before on_run() reads them.
+    void trigger_auto_run();
+
+    QJsonArray pending_weights_;
     bool first_show_ = true;
     bool is_running_ = false;
+    // Set when a caller requests an immediate backtest but strategies are still
+    // loading; the get_strategies callback fires the deferred run once ready.
+    bool pending_auto_run_ = false;
 
     // Symbol-group link (None when unlinked).
     SymbolGroup link_group_ = SymbolGroup::None;

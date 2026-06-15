@@ -37,6 +37,7 @@ class PortfolioSummaryWidget : public BaseWidget {
     void on_theme_changed() override;
     void showEvent(QShowEvent* e) override;
     void hideEvent(QHideEvent* e) override;
+    void retranslateUi() override;
     QDialog* make_config_dialog(QWidget* parent) override;
 
   private:
@@ -69,6 +70,7 @@ class PortfolioSummaryWidget : public BaseWidget {
     // ── Selected portfolio ─────────────────────────────────────────────────
     QString selected_portfolio_id_;
     QString selected_portfolio_name_;
+    QString selected_portfolio_currency_ = QStringLiteral("USD"); // the picked portfolio's own currency
     QVector<portfolio::Portfolio> portfolio_cache_;
 
     // ── Summary labels ──────────────────────────────────────────────────────

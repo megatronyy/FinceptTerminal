@@ -17,6 +17,10 @@
 
 namespace fincept::mcp {
 
+/// Default hard timeout for MCP tool handlers (ms). Single source of truth for
+/// the 30s default referenced by ToolContext, ToolDef, and McpProvider.
+constexpr int kMcpDefaultTimeoutMs = 30000;
+
 // ============================================================================
 // Tool Result — returned by tool handlers
 // ============================================================================
@@ -105,7 +109,7 @@ struct ToolContext {
     /// resolves the promise with a timeout error if the handler hasn't
     /// finished by then. Default: 30s; per-tool override via
     /// ToolDef::default_timeout_ms; per-call override via _meta.timeout_ms.
-    int timeout_ms = 30000;
+    int timeout_ms = kMcpDefaultTimeoutMs;
 
     /// Convenience — true if cancellation hook is set AND signalled.
     bool cancelled() const { return is_cancelled && is_cancelled(); }
@@ -274,7 +278,7 @@ struct ToolDef {
     /// for snappy tools (e.g. registry lookups, paper-trading orders) and
     /// larger for slow ones (e.g. analytics scripts that run a full backtest).
     /// Per-call overrides are merged from `_meta.timeout_ms` (Phase 6).
-    int default_timeout_ms = 30000;
+    int default_timeout_ms = kMcpDefaultTimeoutMs;
 
     // ── Phase 6: Authorization ──────────────────────────────────────────
     /// Required auth level — checked by McpProvider::call_tool before the
@@ -308,7 +312,7 @@ struct ToolDef {
 //   • prompt cost shrinks for non-cached providers
 //   • the LLM has fewer distractors when picking a tool
 //   • dangerous categories can be excluded by default and lazy-discovered
-//     via the tool.list / tool.describe meta-tools (Phase 6.2).
+//     via the tool_list / tool_describe meta-tools (Phase 6.2).
 
 struct ToolFilter {
     /// Inclusive — only tools whose category matches one of these are kept.
@@ -375,7 +379,7 @@ struct UnifiedTool {
     QJsonObject input_schema;
     bool is_internal = false;
     QString category; // Phase 6: enables ToolFilter category include/exclude
-    bool is_destructive = false; // Tool RAG / tool.list surfacing — flag mutating tools
+    bool is_destructive = false; // Tool RAG / tool_list surfacing — flag mutating tools
 };
 
 // ============================================================================

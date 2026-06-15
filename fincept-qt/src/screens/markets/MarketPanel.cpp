@@ -1,5 +1,7 @@
 #include "screens/markets/MarketPanel.h"
 #include <cmath>
+#include "core/events/EventBus.h"
+#include "services/backtesting/BacktestingService.h"
 #include "ui/theme/Theme.h"
 #include "ui/theme/ThemeManager.h"
 #include "ui/formatting/NumberFormat.h"
@@ -60,9 +62,9 @@ void MarketPanel::build_ui() {
         return b;
     };
 
-    cols_btn_   = make_hdr_btn("[COLS]");
-    edit_btn_   = make_hdr_btn("[EDIT]");
-    delete_btn_ = make_hdr_btn("[DEL]");
+    cols_btn_   = make_hdr_btn(tr("[COLS]"));
+    edit_btn_   = make_hdr_btn(tr("[EDIT]"));
+    delete_btn_ = make_hdr_btn(tr("[DEL]"));
 
     hhl->addWidget(cols_btn_);
     hhl->addWidget(edit_btn_);
@@ -112,7 +114,7 @@ void MarketPanel::build_ui() {
     el->setAlignment(Qt::AlignCenter);
     error_label_ = new QLabel;
     error_label_->setAlignment(Qt::AlignCenter);
-    retry_btn_ = new QPushButton("[RETRY]");
+    retry_btn_ = new QPushButton(tr("[RETRY]"));
     retry_btn_->setCursor(Qt::PointingHandCursor);
     retry_btn_->setFlat(true);
     connect(retry_btn_, &QPushButton::clicked, this, &MarketPanel::refresh);
@@ -125,7 +127,7 @@ void MarketPanel::build_ui() {
     loading_widget_ = new QWidget(body_);
     auto* ll = new QVBoxLayout(loading_widget_);
     ll->setAlignment(Qt::AlignCenter);
-    loading_label_ = new QLabel("  ⠋  LOADING");
+    loading_label_ = new QLabel(tr("  %1  LOADING").arg(QString::fromUtf8("\xe2\xa0\x8b")));
     loading_label_->setAlignment(Qt::AlignCenter);
     ll->addWidget(loading_label_);
     bl->addWidget(loading_widget_);
@@ -137,23 +139,55 @@ void MarketPanel::build_ui() {
     vl->addWidget(body_, 1);
 }
 
+QString MarketPanel::column_label(const QString& code) const {
+    // Maps an internal column code (a data key used in config_.column_order
+    // and in the populate() switch) to its user-facing, translatable header
+    // label. SYMBOL is the locked first column and renders the human-readable
+    // name, so it is labelled "NAME".
+    if (code == "SYMBOL") return tr("NAME");
+    if (code == "LAST")   return tr("LAST");
+    if (code == "CHG")    return tr("CHG");
+    if (code == "CHG%")   return tr("CHG%");
+    if (code == "HIGH")   return tr("HIGH");
+    if (code == "LOW")    return tr("LOW");
+    if (code == "VOL")    return tr("VOL");
+    if (code == "BID")    return tr("BID");
+    if (code == "ASK")    return tr("ASK");
+    if (code == "OPEN")   return tr("OPEN");
+    if (code == "TICKER") return tr("TICKER");
+    if (code == "NAME")   return tr("NAME");
+    return code;  // unknown code — show raw (data fallback)
+}
+
 void MarketPanel::setup_table_columns() {
     const QStringList& cols = config_.column_order;
     table_->setColumnCount(cols.size());
 
-    // Set header labels with alignment matching cell alignment
+    // Set header labels with alignment matching cell alignment.
+    // The locked first column ("SYMBOL") now renders the human-readable name,
+    // so it's labelled NAME; the raw ticker is available via the TICKER column.
     for (int i = 0; i < cols.size(); ++i) {
         const QString& c = cols[i];
-        auto* hdr = new QTableWidgetItem(c);
-        bool is_text = (c == "SYMBOL" || c == "NAME");
+        const QString label = column_label(c);
+        auto* hdr = new QTableWidgetItem(label);
+        bool is_text = (c == "SYMBOL" || c == "NAME" || c == "TICKER");
         hdr->setTextAlignment(is_text ? (Qt::AlignLeft | Qt::AlignVCenter)
                                       : (Qt::AlignRight | Qt::AlignVCenter));
         table_->setHorizontalHeaderItem(i, hdr);
     }
 
-    // All columns stretch to fill available width evenly.
-    for (int i = 0; i < cols.size(); ++i)
-        table_->horizontalHeader()->setSectionResizeMode(i, QHeaderView::Stretch);
+    // Column sizing: the NAME column (human-readable, variable-length) gets the
+    // leftover width via Stretch, while the compact numeric/ticker columns size
+    // to their content. Sharing equal stretch across every column starved the
+    // name column and truncated long names ("State Street SPDR S&P 500 ETF…").
+    auto* hh = table_->horizontalHeader();
+    for (int i = 0; i < cols.size(); ++i) {
+        const QString& c = cols[i];
+        if (c == "SYMBOL" || c == "NAME")
+            hh->setSectionResizeMode(i, QHeaderView::Stretch);
+        else
+            hh->setSectionResizeMode(i, QHeaderView::ResizeToContents);
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -170,10 +204,12 @@ void MarketPanel::open_cols_dropdown() {
             .arg(ui::colors::BG_RAISED(), ui::colors::BORDER_MED(),
                  ui::colors::TEXT_PRIMARY(), ui::colors::BG_HOVER()));
 
-    const QStringList optional = {"CHG", "CHG%", "HIGH", "LOW", "VOL", "BID", "ASK", "OPEN", "NAME"};
+    // NAME is now the locked first column (renders the friendly name), so the
+    // optional set offers TICKER instead for users who also want the raw symbol.
+    const QStringList optional = {"CHG", "CHG%", "HIGH", "LOW", "VOL", "BID", "ASK", "OPEN", "TICKER"};
 
     for (const QString& col : optional) {
-        auto* act = menu->addAction(col);
+        auto* act = menu->addAction(column_label(col));
         act->setCheckable(true);
         act->setChecked(config_.column_order.contains(col));
         // Enforce max 7 columns (SYMBOL + LAST are locked = 2, so max 5 optional)
@@ -254,6 +290,25 @@ void MarketPanel::hub_resubscribe() {
         return;
     }
 
+    // Resolve human-readable display names so the table shows "S&P 500" / "Gold"
+    // instead of "^GSPC" / "GC=F". Cached after first resolution, so this is a
+    // no-op fast path on subsequent refreshes. Re-render when names arrive.
+    QPointer<MarketPanel> self = this;
+    services::MarketDataService::instance().resolve_names(
+        config_.symbols, [self](const QHash<QString, QString>& m) {
+            if (!self || m.isEmpty())
+                return;
+            bool changed = false;
+            for (auto it = m.constBegin(); it != m.constEnd(); ++it) {
+                if (self->names_.value(it.key()) != it.value()) {
+                    self->names_.insert(it.key(), it.value());
+                    changed = true;
+                }
+            }
+            if (changed && self->has_data_)
+                self->populate(self->cached_quotes_);
+        });
+
     // Fresh subscribe if never active or symbol set was reconfigured.
     // Cheaper to always re-wire since MarketsScreen rarely calls refresh()
     // outside of user action / auto-refresh tick, and the hub dedupes topics.
@@ -319,7 +374,7 @@ void MarketPanel::tick_loading_anim() {
     };
     constexpr int kCount = 10;
     loading_frame_ = (loading_frame_ + 1) % kCount;
-    loading_label_->setText(QString("  %1  LOADING").arg(kFrames[loading_frame_]));
+    loading_label_->setText(tr("  %1  LOADING").arg(QString::fromUtf8(kFrames[loading_frame_])));
 }
 
 void MarketPanel::show_data() {
@@ -362,16 +417,38 @@ void MarketPanel::populate(const QVector<services::QuoteData>& quotes) {
             return item;
         };
 
+        // Human-readable display name: prefer the resolved yfinance name
+        // (e.g. "S&P 500", "Gold"), fall back to any name on the quote, then
+        // to the raw ticker. The ticker is still kept on the cell (UserRole +
+        // tooltip) so copy / backtest / context-menu actions keep working.
+        QString disp = names_.value(q.symbol);
+        if (disp.isEmpty())
+            disp = (!q.name.isEmpty() && q.name != q.symbol) ? q.name : q.symbol;
+
+        // Currency symbol shown in front of price levels (e.g. "$", "₹").
+        // Empty for forex pairs / index levels / yields, where it isn't
+        // meaningful. Resolved & cached alongside the display name.
+        const QString cur = services::MarketDataService::instance().currency_prefix(q.symbol);
+
         const QStringList& cols = config_.column_order;
         for (int ci = 0; ci < cols.size(); ++ci) {
             const QString& col = cols[ci];
-            if      (col == "SYMBOL") table_->setItem(row, ci, mk(q.symbol, ui::colors::TEXT_PRIMARY(), Qt::AlignLeft | Qt::AlignVCenter));
-            else if (col == "NAME")   table_->setItem(row, ci, mk(q.name,   ui::colors::TEXT_DIM(),     Qt::AlignLeft | Qt::AlignVCenter));
-            else if (col == "LAST")   table_->setItem(row, ci, mk(QString::number(q.price,  'f', prec), ui::colors::AMBER()));
+            if (col == "SYMBOL") {
+                auto* item = mk(disp, ui::colors::TEXT_PRIMARY(), Qt::AlignLeft | Qt::AlignVCenter);
+                item->setData(Qt::UserRole, q.symbol);  // raw ticker, for copy / backtest
+                // Full name + ticker on hover, so a name too long for the column
+                // (e.g. "State Street SPDR S&P 500 ETF Trust") is still readable.
+                item->setToolTip(disp == q.symbol ? q.symbol
+                                                  : QString("%1  (%2)").arg(disp, q.symbol));
+                table_->setItem(row, ci, item);
+            }
+            else if (col == "NAME")   table_->setItem(row, ci, mk(disp,     ui::colors::TEXT_DIM(),     Qt::AlignLeft | Qt::AlignVCenter));
+            else if (col == "TICKER") table_->setItem(row, ci, mk(q.symbol, ui::colors::TEXT_DIM(),     Qt::AlignLeft | Qt::AlignVCenter));
+            else if (col == "LAST")   table_->setItem(row, ci, mk(cur + QString::number(q.price, 'f', prec), ui::colors::AMBER()));
             else if (col == "CHG")    table_->setItem(row, ci, mk(QString("%1 %2").arg(arr).arg(std::abs(q.change),     0, 'f', 2), cc));
             else if (col == "CHG%")   table_->setItem(row, ci, mk(QString("%1%2%").arg(arr).arg(std::abs(q.change_pct), 0, 'f', 2), cc));
-            else if (col == "HIGH")   table_->setItem(row, ci, mk(QString::number(q.high, 'f', 2), ui::colors::TEXT_SECONDARY()));
-            else if (col == "LOW")    table_->setItem(row, ci, mk(QString::number(q.low,  'f', 2), ui::colors::TEXT_SECONDARY()));
+            else if (col == "HIGH")   table_->setItem(row, ci, mk(cur + QString::number(q.high, 'f', 2), ui::colors::TEXT_SECONDARY()));
+            else if (col == "LOW")    table_->setItem(row, ci, mk(cur + QString::number(q.low,  'f', 2), ui::colors::TEXT_SECONDARY()));
             else if (col == "VOL")    table_->setItem(row, ci, mk(fincept::ui::formatting::format_compact_volume(static_cast<qint64>(q.volume)), ui::colors::TEXT_DIM()));
             else if (col == "BID")    table_->setItem(row, ci, mk("--", ui::colors::TEXT_DIM()));
             else if (col == "ASK")    table_->setItem(row, ci, mk("--", ui::colors::TEXT_DIM()));
@@ -485,15 +562,62 @@ void MarketPanel::show_row_context_menu(const QPoint& pos) {
     auto* it = table_->itemAt(pos);
     if (!it) return;
 
+    // Column 0 now shows the friendly name; the raw ticker lives in UserRole.
+    auto ticker_at = [this](int row) -> QString {
+        auto* sym_item = table_->item(row, 0);
+        if (!sym_item) return QString();
+        const QString t = sym_item->data(Qt::UserRole).toString();
+        return t.isEmpty() ? sym_item->text() : t;
+    };
+
     QMenu menu(this);
-    QAction* copy_act = menu.addAction("Copy Symbol");
-    connect(copy_act, &QAction::triggered, this, [this, it]() {
-        auto* sym_item = table_->item(it->row(), 0);
-        if (sym_item) {
-            QApplication::clipboard()->setText(sym_item->text());
-        }
+    QAction* copy_act = menu.addAction(tr("Copy Symbol"));
+    connect(copy_act, &QAction::triggered, this, [it, ticker_at]() {
+        const QString t = ticker_at(it->row());
+        if (!t.isEmpty())
+            QApplication::clipboard()->setText(t);
+    });
+    QAction* backtest_act = menu.addAction(tr("Backtest This Symbol"));
+    connect(backtest_act, &QAction::triggered, this, [it, ticker_at]() {
+        const QString t = ticker_at(it->row());
+        if (t.isEmpty()) return;
+        QJsonObject config;
+        QJsonArray symbols;
+        symbols.append(t);
+        config["symbols"] = symbols;
+        fincept::services::backtest::BacktestingService::instance().set_pending_portfolio_config(config);
+        fincept::EventBus::instance().publish("nav.switch_screen", {{"screen_id", QString("backtesting")}});
     });
     menu.exec(table_->viewport()->mapToGlobal(pos));
+}
+
+// ---------------------------------------------------------------------------
+// i18n — live language switch
+// ---------------------------------------------------------------------------
+
+void MarketPanel::changeEvent(QEvent* event) {
+    if (event->type() == QEvent::LanguageChange)
+        retranslateUi();
+    QWidget::changeEvent(event);
+}
+
+void MarketPanel::retranslateUi() {
+    if (cols_btn_)   cols_btn_->setText(tr("[COLS]"));
+    if (edit_btn_)   edit_btn_->setText(tr("[EDIT]"));
+    if (delete_btn_) delete_btn_->setText(tr("[DEL]"));
+    if (retry_btn_)  retry_btn_->setText(tr("[RETRY]"));
+
+    // Loading spinner — keep the current animation frame, refresh the word.
+    static const char* const kFrames[] = {
+        "\xe2\xa0\x8b", "\xe2\xa0\x99", "\xe2\xa0\xb9", "\xe2\xa0\xb8", "\xe2\xa0\xbc",
+        "\xe2\xa0\xb4", "\xe2\xa0\xa6", "\xe2\xa0\xa7", "\xe2\xa0\x87", "\xe2\xa0\x8f"
+    };
+    if (loading_label_)
+        loading_label_->setText(tr("  %1  LOADING").arg(QString::fromUtf8(kFrames[loading_frame_ % 10])));
+
+    // Table column headers — re-derived from the translated column labels.
+    setup_table_columns();
+    if (has_data_) populate(cached_quotes_);
 }
 
 } // namespace fincept::screens

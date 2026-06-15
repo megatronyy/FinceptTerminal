@@ -2,6 +2,7 @@
 
 #include "auth/AuthManager.h"
 #include "auth/UserApi.h"
+#include "core/currency/Currency.h"
 #include "core/logging/Logger.h"
 #include "ui/theme/Theme.h"
 
@@ -424,12 +425,12 @@ QWidget* ProfileScreen::build_security() {
         QString("QPushButton{background:%1;color:%2;border:1px solid %3;padding:0 10px;"
                 "font-size:10px;font-weight:700;font-family:'Consolas',monospace;}QPushButton:hover{color:%4;}")
             .arg(ui::colors::BG_RAISED(), ui::colors::TEXT_SECONDARY(), ui::colors::BORDER_DIM(), ui::colors::TEXT_PRIMARY()));
-    connect(cb, &QPushButton::clicked, this, [this, cb]() {
+    connect(cb, &QPushButton::clicked, this, [cb]() {
         auto key = auth::AuthManager::instance().session().api_key;
         if (!key.isEmpty()) {
             QApplication::clipboard()->setText(key);
             cb->setText(tr("COPIED"));
-            QTimer::singleShot(1500, cb, [this, cb]() { cb->setText(tr("COPY")); });
+            QTimer::singleShot(1500, cb, [cb]() { cb->setText(tr("COPY")); });
         }
     });
     krl->addWidget(cb);
@@ -704,7 +705,7 @@ void ProfileScreen::fetch_billing_data() {
             self->bill_history_->setItem(row, 0, new QTableWidgetItem(e["created_at"].toString().left(10)));
             self->bill_history_->setItem(row, 1, new QTableWidgetItem(e["plan_name"].toString()));
             self->bill_history_->setItem(
-                row, 2, new QTableWidgetItem(QString("$%1").arg(e["amount_usd"].toDouble(), 0, 'f', 2)));
+                row, 2, new QTableWidgetItem(cur::money(e["amount_usd"].toDouble())));
             self->bill_history_->setItem(row, 3, new QTableWidgetItem(QString::number(e["credits_purchased"].toInt())));
             self->bill_history_->setItem(row, 4, new QTableWidgetItem(e["status"].toString().toUpper()));
         }

@@ -4,9 +4,13 @@
 #include "screens/fno/BuilderSubTab.h"
 #include "screens/fno/ChainSubTab.h"
 #include "screens/fno/FiiDiiSubTab.h"
+#include "screens/fno/LegEditorTable.h"
 #include "screens/fno/MultiStraddleSubTab.h"
 #include "screens/fno/OISubTab.h"
+#include "screens/fno/OptionChainTable.h"
 #include "screens/fno/ScreenerSubTab.h"
+#include "screens/common/PaperBlotterPanel.h"
+#include "services/options/OptionChainService.h"
 #include "ui/theme/Theme.h"
 
 #include <QHBoxLayout>
@@ -17,25 +21,13 @@
 #include <QString>
 #include <QVBoxLayout>
 
+#include <cmath>
+
 namespace fincept::screens::fno {
 
 using namespace fincept::ui;
 
 namespace {
-
-struct TabDef {
-    const char* label;
-    const char* description;
-};
-
-constexpr TabDef kTabDefs[FnoScreen::TabCount] = {
-    {"Chain", "Live option chain (Phase 2)"},
-    {"Builder", "Strategy builder + payoff (Phase 5)"},
-    {"OI", "Open Interest analytics (Phase 7)"},
-    {"Multi-Stra", "Multi straddle / strangle charts (Phase 9)"},
-    {"FII / DII", "Institutional flows (Phase 8)"},
-    {"Screener", "Chain screener (Phase 9)"},
-};
 
 template <typename Sub>
 void replace_placeholder(QStackedWidget* stack, QHash<int, QWidget*>& tabs, int slot, Sub*& target,
@@ -52,6 +44,32 @@ void replace_placeholder(QStackedWidget* stack, QHash<int, QWidget*>& tabs, int 
 }
 
 }  // namespace
+
+QString FnoScreen::tab_label_for(int index) {
+    switch (index) {
+        case TabChain:         return tr("Chain");
+        case TabBuilder:       return tr("Builder");
+        case TabOI:            return tr("OI");
+        case TabMultiStraddle: return tr("Multi-Stra");
+        case TabFiiDii:        return tr("FII / DII");
+        case TabScreener:      return tr("Screener");
+        case TabPositions:     return tr("Positions");
+        default:               return {};
+    }
+}
+
+QString FnoScreen::tab_detail_for(int index) {
+    switch (index) {
+        case TabChain:         return tr("Live option chain (Phase 2)");
+        case TabBuilder:       return tr("Strategy builder + payoff (Phase 5)");
+        case TabOI:            return tr("Open Interest analytics (Phase 7)");
+        case TabMultiStraddle: return tr("Multi straddle / strangle charts (Phase 9)");
+        case TabFiiDii:        return tr("Institutional flows (Phase 8)");
+        case TabScreener:      return tr("Chain screener (Phase 9)");
+        case TabPositions:     return tr("Paper positions, orders & square-off");
+        default:               return {};
+    }
+}
 
 FnoScreen::FnoScreen(QWidget* parent) : QWidget(parent) {
     setObjectName("fnoScreen");
@@ -83,8 +101,7 @@ void FnoScreen::setup_ui() {
     // 1:1 to SubTab values. The Chain slot is replaced with the real widget
     // immediately so the user sees data on first reveal.
     for (int i = 0; i < TabCount; ++i) {
-        auto* placeholder =
-            build_placeholder(QString::fromLatin1(kTabDefs[i].label), QString::fromLatin1(kTabDefs[i].description));
+        auto* placeholder = build_placeholder(tab_label_for(i), tab_detail_for(i));
         stack_->addWidget(placeholder);
         tabs_.insert(i, placeholder);
     }
@@ -104,7 +121,7 @@ QWidget* FnoScreen::build_tab_bar() {
 
     tab_btns_.reserve(TabCount);
     for (int i = 0; i < TabCount; ++i) {
-        auto* btn = new QPushButton(QString::fromLatin1(kTabDefs[i].label).toUpper(), bar);
+        auto* btn = new QPushButton(tab_label_for(i).toUpper(), bar);
         btn->setObjectName("fnoTabBtn");
         btn->setCursor(Qt::PointingHandCursor);
         btn->setProperty("active", i == int(active_tab_));
@@ -122,7 +139,7 @@ QWidget* FnoScreen::build_placeholder(const QString& tab_name, const QString& de
     lay->setContentsMargins(0, 0, 0, 0);
     lay->setSpacing(6);
     lay->addStretch(1);
-    auto* title = new QLabel(tab_name + " — coming in a later phase", wrap);
+    auto* title = new QLabel(tr("%1 — coming in a later phase").arg(tab_name), wrap);
     title->setObjectName("fnoComingSoon");
     title->setAlignment(Qt::AlignCenter);
     auto* hint = new QLabel(detail, wrap);
@@ -144,6 +161,30 @@ void FnoScreen::ensure_tab_built(SubTab which) {
         BuilderSubTab* p = nullptr;
         replace_placeholder<BuilderSubTab>(stack_, tabs_, TabBuilder, p, this);
         builder_tab_ = p;
+        if (chain_tab_ && chain_tab_->table()) {
+            connect(chain_tab_->table(), &OptionChainTable::leg_clicked,
+                    builder_tab_, [this](qint64 token, double strike, bool is_call, int lots) {
+                Q_UNUSED(token);
+                const auto& chain = fincept::services::options::OptionChainService::instance().last_chain();
+                fincept::services::options::StrategyLeg leg;
+                leg.strike = strike;
+                leg.type = is_call ? fincept::trading::InstrumentType::CE
+                                   : fincept::trading::InstrumentType::PE;
+                leg.lots = lots;
+                for (const auto& row : chain.rows) {
+                    if (std::abs(row.strike - strike) < 1e-6) {
+                        const auto& q = is_call ? row.ce_quote : row.pe_quote;
+                        leg.entry_price = q.ltp;
+                        leg.iv_at_entry = is_call ? row.ce_iv : row.pe_iv;
+                        leg.lot_size = row.lot_size > 0 ? row.lot_size : 1;
+                        leg.instrument_token = is_call ? row.ce_token : row.pe_token;
+                        leg.symbol = is_call ? row.ce_symbol : row.pe_symbol;
+                        break;
+                    }
+                }
+                builder_tab_->legs_view()->leg_model()->append_leg(leg);
+            });
+        }
     }
     if (which == TabOI && !oi_tab_) {
         OISubTab* p = nullptr;
@@ -164,6 +205,14 @@ void FnoScreen::ensure_tab_built(SubTab which) {
         ScreenerSubTab* p = nullptr;
         replace_placeholder<ScreenerSubTab>(stack_, tabs_, TabScreener, p, this);
         screener_tab_ = p;
+    }
+    if (which == TabPositions && !positions_tab_) {
+        // Shared paper blotter: open positions / working orders / trades for every
+        // active paper account, with square-off. Self-populating and live via
+        // PaperMarkService — no per-screen marking wiring needed here.
+        common::PaperBlotterPanel* p = nullptr;
+        replace_placeholder<common::PaperBlotterPanel>(stack_, tabs_, TabPositions, p, this);
+        positions_tab_ = p;
     }
     // Phase 9: all six F&O sub-tabs are real (no more placeholders).
 }
@@ -285,6 +334,18 @@ void FnoScreen::showEvent(QShowEvent* e) {
 
 void FnoScreen::hideEvent(QHideEvent* e) {
     QWidget::hideEvent(e);
+}
+
+void FnoScreen::changeEvent(QEvent* event) {
+    if (event->type() == QEvent::LanguageChange)
+        retranslateUi();
+    QWidget::changeEvent(event);
+}
+
+void FnoScreen::retranslateUi() {
+    for (int i = 0; i < tab_btns_.size(); ++i)
+        if (tab_btns_.at(i))
+            tab_btns_.at(i)->setText(tab_label_for(i).toUpper());
 }
 
 } // namespace fincept::screens::fno

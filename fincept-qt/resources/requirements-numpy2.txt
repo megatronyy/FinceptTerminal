@@ -2,6 +2,9 @@
 # All libraries compatible with NumPy 2.x
 
 # Core dependencies
+# numpy + pandas also power the prebuilt Fincept Notebook library
+# (Intermediate/Hard notebooks under resources/notebooks/). Beginner notebooks
+# use the Python standard library only and need no packages.
 numpy>=2.2.3,<3.0
 pandas>=2.3.3,<3.0
 
@@ -21,6 +24,10 @@ databento==0.66.0
 databento-dbn==0.44.0
 feedparser==6.0.12
 gnews==0.4.2
+# Offline, finance-tuned headline sentiment for the Equity Research → Sentiment
+# tab (news_nlp.py). Pure-python, no model download; news_nlp falls back to a
+# keyword scorer if this is absent.
+vaderSentiment==3.3.2
 geopy>=2.4.0
 akshare>=1.14.0
 aiohappyeyeballs==2.6.1
@@ -95,7 +102,6 @@ river>=0.21.0
 
 # Technical analysis
 ta==0.11.0
-talipp==2.7.0
 
 # Portfolio optimization
 finquant-enhanced
@@ -162,10 +168,9 @@ mplfinance>=0.12.0
 
 # Voice recognition (speech-to-text via Google API).
 # sounddevice ships PortAudio inside its wheel for every platform we support
-# (Windows x64, macOS x86_64 + arm64, Linux x86_64 + aarch64), removing the
-# old PyAudio install failure on Apple Silicon machines without Homebrew
-# portaudio. scripts/voice/* implements a thin SpeechRecognition AudioSource
-# shim on top of sd.RawInputStream so the SR API stays unchanged.
+# (Windows x64, macOS x86_64 + arm64, Linux x86_64 + aarch64).
+# scripts/voice/* implements a thin SpeechRecognition AudioSource shim on top
+# of sd.RawInputStream so the SR API stays unchanged.
 SpeechRecognition>=3.10.0
 sounddevice>=0.4.6
 

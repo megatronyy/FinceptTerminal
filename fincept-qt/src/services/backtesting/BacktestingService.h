@@ -24,6 +24,11 @@ class BacktestingService : public QObject {
     /// Legacy: load strategies from fincept provider only
     void list_strategies();
 
+    /// Store a portfolio config for BacktestingScreen to pick up on next show.
+    void set_pending_portfolio_config(const QJsonObject& config);
+    /// Take (and clear) the pending config. Returns empty if none pending.
+    QJsonObject take_pending_portfolio_config();
+
   signals:
     void result_ready(QString provider, QString command, QJsonObject data);
     void strategies_loaded(QJsonObject strategies);
@@ -33,6 +38,11 @@ class BacktestingService : public QObject {
   private:
     explicit BacktestingService(QObject* parent = nullptr);
     Q_DISABLE_COPY(BacktestingService)
+
+    /// Run the provider script via PythonRunner (the pre-broker-injection dispatch).
+    void dispatch_python(const QString& provider, const QString& command, const QJsonObject& args);
+
+    QJsonObject pending_portfolio_config_;
 };
 
 } // namespace fincept::services::backtest

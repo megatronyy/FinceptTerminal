@@ -64,14 +64,11 @@ void LlmService::ensure_config() const {
     // those re-resolve every call so a login that happens after first ensure_config() doesn't 401 forever.
     if (config_loaded_) {
         if (provider_ == "fincept") {
-            const auto& sess = fincept::auth::AuthManager::instance().session();
-            if (!sess.api_key.isEmpty()) {
-                api_key_ = sess.api_key;
-            } else {
-                auto stored = SettingsRepository::instance().get("fincept_api_key");
-                if (stored.is_ok() && !stored.value().isEmpty())
-                    api_key_ = stored.value();
-            }
+            // Resolve via AuthManager (session → SecureStorage). Never the
+            // legacy plaintext settings row (CR-08).
+            const QString key = fincept::auth::AuthManager::instance().fincept_api_key();
+            if (!key.isEmpty())
+                api_key_ = key;
         }
         return;
     }
@@ -113,16 +110,12 @@ void LlmService::ensure_config() const {
         LOG_INFO(kLlmSvcTag, "No LLM provider configured — using Fincept default");
     }
 
-    // Fincept key always comes from the live AuthManager session; SettingsRepository fallback is the legacy path.
+    // Fincept key resolves via AuthManager (live session → encrypted
+    // SecureStorage). The legacy plaintext settings row is no longer read (CR-08).
     if (provider_ == "fincept") {
-        const auto& sess = fincept::auth::AuthManager::instance().session();
-        if (!sess.api_key.isEmpty()) {
-            api_key_ = sess.api_key;
-        } else {
-            auto stored_key = SettingsRepository::instance().get("fincept_api_key");
-            if (stored_key.is_ok() && !stored_key.value().isEmpty())
-                api_key_ = stored_key.value();
-        }
+        const QString key = fincept::auth::AuthManager::instance().fincept_api_key();
+        if (!key.isEmpty())
+            api_key_ = key;
     }
 
     auto gs = LlmConfigRepository::instance().get_global_settings();
@@ -194,7 +187,7 @@ void LlmService::ensure_config() const {
             "Be concise, accurate, and finance-focused.";
     }
 
-    // Tool RAG discovery hint: lists categories dynamically so the model can form good tool.list() queries.
+    // Tool RAG discovery hint: lists categories dynamically so the model can form good tool_list() queries.
     // The `[Tool discovery]` sentinel makes append idempotent across reloads. Cached static for prompt-cache stability.
     if (tools_enabled_ && !system_prompt_.contains("[Tool discovery]")) {
         // Tool registry is immutable after McpInit; runtime additions won't appear until restart (acceptable here).
@@ -211,11 +204,11 @@ void LlmService::ensure_config() const {
             QString hint =
                 "\n\n[Tool discovery] You see only a small subset of tools each turn. "
                 "To find a tool for any action you don't already have, call "
-                "tool.list(query=\"<natural-language description>\"). "
+                "tool_list(query=\"<natural-language description>\"). "
                 "It returns the top 5 most relevant tools (BM25-ranked). "
-                "Then call tool.describe(name) for the full input schema, then invoke it. "
+                "Then call tool_describe(name) for the full input schema, then invoke it. "
                 "For requests with multiple intents (\"get news AND add to watchlist\"), "
-                "call tool.list MULTIPLE TIMES — once per intent. "
+                "call tool_list MULTIPLE TIMES — once per intent. "
                 "Never decline an action you can fulfil via a discoverable tool.";
             if (!sorted_cats.isEmpty()) {
                 hint += "\nAvailable tool categories: " + sorted_cats.join(", ") + ".";
@@ -339,7 +332,7 @@ QString LlmService::get_endpoint_url() const {
 
     // Fincept sync chat endpoint (async lives in fincept_async_request).
     if (p == "fincept") {
-        return "https://api.fincept.in/research/chat";
+        return fincept::AppConfig::instance().api_base_url() + "/research/chat";
     }
 
     // Custom base_url wins over hard-coded defaults.
@@ -382,6 +375,13 @@ QString LlmService::get_endpoint_url() const {
         return "http://localhost:11434/v1/chat/completions";
     if (p == "xai")
         return "https://api.x.ai/v1/chat/completions";
+    if (p == "aihubmix")
+        // Fallback for when the prefilled base_url was cleared; the custom-base_url
+        // branch above wins whenever it's set (incl. regional/proxy overrides).
+        return "https://aihubmix.com/v1/chat/completions";
+    if (p == "atlascloud")
+        // Fallback if the prefilled base_url was cleared; custom-base_url branch wins otherwise.
+        return "https://api.atlascloud.ai/v1/chat/completions";
     return {};
 }
 
@@ -499,23 +499,65 @@ LlmResponse LlmService::do_request(const QString& user_message, const std::vecto
 
             loop_msgs.append(QJsonObject{{"role", "user"}, {"content", tool_results}});
 
-            // No tools in follow-up — prevents infinite loop.
-            QJsonObject fu;
-            fu["model"] = model_;
-            fu["messages"] = loop_msgs;
-            fu["max_tokens"] = resolved_max_tokens();
-            if (!system_prompt_.isEmpty())
-                fu["system"] = system_prompt_;
+            // ── Multi-round tool loop ──
+            // Previously this was a SINGLE follow-up with NO tools attached, so
+            // the model could execute exactly one tool and never chain a second
+            // (multi-step flows like "create a portfolio then add assets" broke).
+            // We now loop, keeping the full tool set advertised each round, until
+            // the model returns a final text answer or we hit the round cap. All
+            // tools are always declared (full catalogue), so no activation step
+            // is needed here — unlike the Tool-RAG OpenAI path.
+            const int kMaxRounds = active_max_tool_rounds();
+            const QJsonArray ant_tools = build_anthropic_tools();
+            for (int round = 0; round < kMaxRounds; ++round) {
+                QJsonObject fu;
+                fu["model"]      = model_;
+                fu["messages"]   = loop_msgs;
+                fu["max_tokens"] = resolved_max_tokens();
+                if (!system_prompt_.isEmpty())
+                    fu["system"] = system_prompt_;
+                if (!ant_tools.isEmpty())
+                    fu["tools"] = ant_tools;
 
-            auto fu_http = blocking_post(url, fu, hdr);
-            if (fu_http.success) {
+                auto fu_http = blocking_post(url, fu, hdr);
+                if (!fu_http.success) {
+                    resp.error = "Anthropic tool follow-up failed: " + fu_http.error;
+                    return resp;
+                }
                 auto fu_doc = QJsonDocument::fromJson(fu_http.body);
-                if (!fu_doc.isNull())
-                    resp.content = extract_anthropic_content_text(fu_doc.object()["content"].toArray());
-            } else {
-                resp.error = "Anthropic tool follow-up failed: " + fu_http.error;
-                return resp;
+                if (fu_doc.isNull()) {
+                    resp.error = "Anthropic tool follow-up parse error";
+                    return resp;
+                }
+                const QJsonObject frj = fu_doc.object();
+                const QJsonArray fcontent = frj["content"].toArray();
+
+                if (frj["stop_reason"].toString() != "tool_use") {
+                    resp.content = extract_anthropic_content_text(fcontent); // final answer
+                    break;
+                }
+
+                // More tools requested — record the assistant turn, execute each
+                // tool_use block, and feed the results back for the next round.
+                loop_msgs.append(QJsonObject{{"role", "assistant"}, {"content", fcontent}});
+                QJsonArray more_results;
+                for (const auto& block_val : fcontent) {
+                    const QJsonObject block = block_val.toObject();
+                    if (block["type"].toString() != "tool_use")
+                        continue;
+                    const QString tid = block["id"].toString();
+                    const QString tname = block["name"].toString();
+                    LOG_INFO(kLlmSvcTag, QString("Anthropic tool loop r%1: %2").arg(round).arg(tname));
+                    auto tr = mcp::McpService::instance().execute_openai_function(tname, block["input"].toObject());
+                    more_results.append(QJsonObject{
+                        {"type", "tool_result"},
+                        {"tool_use_id", tid},
+                        {"content", QString::fromUtf8(QJsonDocument(tr.to_json()).toJson(QJsonDocument::Compact))}});
+                }
+                loop_msgs.append(QJsonObject{{"role", "user"}, {"content", more_results}});
             }
+            if (resp.content.isEmpty() && resp.error.isEmpty())
+                resp.error = "Anthropic tool loop exceeded maximum rounds";
         } else {
             resp.content = extract_anthropic_content_text(content);
         }
@@ -535,55 +577,57 @@ LlmResponse LlmService::do_request(const QString& user_message, const std::vecto
 
             if (has_function_calls) {
                 LOG_INFO(kLlmSvcTag, "Gemini requested function call(s)");
-                // Execute each tool call and build matching functionResponse parts.
-                // Gemini's multi-turn contract: user turn → model turn with functionCall
-                // parts → user turn with functionResponse parts (NOT plain text).
-                QJsonArray fn_response_parts;
-                for (const auto& part_val : parts) {
-                    QJsonObject part = part_val.toObject();
-                    if (!part.contains("functionCall"))
+                // ── Multi-round tool loop ──
+                // Gemini's multi-turn contract: user → model(functionCall parts)
+                // → user(functionResponse parts) → … Previously this ran a SINGLE
+                // follow-up with NO tools attached, so the model could execute one
+                // tool and never chain a second. We now loop, re-attaching the tool
+                // set each round, until a text answer or the round cap.
+                const int kMaxRounds = active_max_tool_rounds();
+                const QJsonArray gem_tools = build_gemini_tools();
+
+                // Constant conversation prefix: prior history + the user turn.
+                QJsonArray fu_contents;
+                for (const auto& m : history) {
+                    if (m.role == "system")
                         continue;
-                    QJsonObject fc = part["functionCall"].toObject();
-                    QString fn_name = fc["name"].toString();
-                    QJsonObject fn_args = fc["args"].toObject();
-
-                    LOG_INFO(kLlmSvcTag, "Executing Gemini tool: " + fn_name);
-                    auto tr = mcp::McpService::instance().execute_openai_function(fn_name, fn_args);
-
-                    // Gemini requires response to be an object — wrap strings under "result".
-                    QJsonObject response_obj;
-                    if (!tr.data.isNull() && !tr.data.isUndefined() && tr.data.isObject())
-                        response_obj = tr.data.toObject();
-                    else if (!tr.message.isEmpty())
-                        response_obj["result"] = tr.message;
-                    else
-                        response_obj = tr.to_json();
-
-                    fn_response_parts.append(QJsonObject{
-                        {"functionResponse",
-                         QJsonObject{{"name", fn_name}, {"response", response_obj}}}});
+                    const QString role = (m.role == "assistant") ? "model" : "user";
+                    fu_contents.append(QJsonObject{
+                        {"role", role}, {"parts", QJsonArray{QJsonObject{{"text", m.content}}}}});
                 }
+                fu_contents.append(QJsonObject{
+                    {"role", "user"}, {"parts", QJsonArray{QJsonObject{{"text", user_message}}}}});
 
-                if (!fn_response_parts.isEmpty()) {
-                    // history + original user + model(functionCall) + user(functionResponse).
-                    QJsonArray fu_contents;
-                    for (const auto& m : history) {
-                        if (m.role == "system")
+                // model_parts = the model turn whose functionCalls we execute this
+                // round; seeded with the initial response's parts.
+                QJsonArray model_parts = parts;
+                QJsonArray last_response_parts;
+                for (int round = 0; round < kMaxRounds; ++round) {
+                    fu_contents.append(QJsonObject{{"role", "model"}, {"parts", model_parts}});
+
+                    QJsonArray fn_response_parts;
+                    for (const auto& part_val : model_parts) {
+                        const QJsonObject part = part_val.toObject();
+                        if (!part.contains("functionCall"))
                             continue;
-                        QString role = (m.role == "assistant") ? "model" : "user";
-                        fu_contents.append(QJsonObject{
-                            {"role", role},
-                            {"parts", QJsonArray{QJsonObject{{"text", m.content}}}}});
+                        const QJsonObject fc = part["functionCall"].toObject();
+                        const QString fn_name = fc["name"].toString();
+                        LOG_INFO(kLlmSvcTag, QString("Gemini tool loop r%1: %2").arg(round).arg(fn_name));
+                        auto tr =
+                            mcp::McpService::instance().execute_openai_function(fn_name, fc["args"].toObject());
+                        // Gemini requires response to be an object — wrap strings under "result".
+                        QJsonObject response_obj;
+                        if (!tr.data.isNull() && !tr.data.isUndefined() && tr.data.isObject())
+                            response_obj = tr.data.toObject();
+                        else if (!tr.message.isEmpty())
+                            response_obj["result"] = tr.message;
+                        else
+                            response_obj = tr.to_json();
+                        fn_response_parts.append(QJsonObject{
+                            {"functionResponse", QJsonObject{{"name", fn_name}, {"response", response_obj}}}});
                     }
-                    fu_contents.append(QJsonObject{
-                        {"role", "user"},
-                        {"parts", QJsonArray{QJsonObject{{"text", user_message}}}}});
-                    fu_contents.append(QJsonObject{
-                        {"role", "model"},
-                        {"parts", parts}}); // echo functionCall parts verbatim
-                    fu_contents.append(QJsonObject{
-                        {"role", "user"},
-                        {"parts", fn_response_parts}});
+                    fu_contents.append(QJsonObject{{"role", "user"}, {"parts", fn_response_parts}});
+                    last_response_parts = fn_response_parts;
 
                     QJsonObject fu_body;
                     fu_body["contents"] = fu_contents;
@@ -593,33 +637,55 @@ LlmResponse LlmService::do_request(const QString& user_message, const std::vecto
                     if (!system_prompt_.isEmpty())
                         fu_body["systemInstruction"] =
                             QJsonObject{{"parts", QJsonArray{QJsonObject{{"text", system_prompt_}}}}};
+                    if (!gem_tools.isEmpty())
+                        fu_body["tools"] = gem_tools;
 
                     auto fu = blocking_post(url, fu_body, hdr);
-                    if (fu.success) {
-                        auto fu_doc = QJsonDocument::fromJson(fu.body);
-                        if (!fu_doc.isNull()) {
-                            QJsonArray fu_cands = fu_doc.object()["candidates"].toArray();
-                            if (!fu_cands.isEmpty())
-                                resp.content = extract_gemini_parts_text(
-                                    fu_cands[0].toObject()["content"].toObject()["parts"].toArray());
+                    if (!fu.success) {
+                        resp.error = "Gemini tool follow-up failed: " + fu.error;
+                        return resp;
+                    }
+                    auto fu_doc = QJsonDocument::fromJson(fu.body);
+                    if (fu_doc.isNull()) {
+                        resp.error = "Gemini tool follow-up parse error";
+                        return resp;
+                    }
+                    const QJsonArray fu_cands = fu_doc.object()["candidates"].toArray();
+                    const QJsonArray resp_parts =
+                        fu_cands.isEmpty()
+                            ? QJsonArray{}
+                            : fu_cands[0].toObject()["content"].toObject()["parts"].toArray();
+
+                    bool more_calls = false;
+                    for (const auto& pv : resp_parts) {
+                        if (pv.toObject().contains("functionCall")) {
+                            more_calls = true;
+                            break;
                         }
                     }
-                    if (resp.content.isEmpty()) {
-                        // Render function responses as readable text.
-                        QString fallback;
-                        for (const auto& pv : fn_response_parts) {
-                            QJsonObject fr = pv.toObject()["functionResponse"].toObject();
-                            QString fn_name = fr["name"].toString();
-                            int sep = fn_name.indexOf("__");
-                            QString short_name = (sep >= 0) ? fn_name.mid(sep + 2) : fn_name;
-                            fallback += "\n**Tool: " + short_name + "**\n" +
-                                        QString::fromUtf8(
-                                            QJsonDocument(fr["response"].toObject()).toJson(QJsonDocument::Compact))
-                                            .left(4000) +
-                                        "\n";
-                        }
-                        resp.content = fallback;
+                    if (!more_calls) {
+                        resp.content = extract_gemini_parts_text(resp_parts); // final answer
+                        break;
                     }
+                    model_parts = resp_parts; // next round executes these
+                }
+
+                if (resp.content.isEmpty()) {
+                    // Loop exhausted without a text turn — render the last round's
+                    // function responses as readable text so the chat isn't blank.
+                    QString fallback;
+                    for (const auto& pv : last_response_parts) {
+                        const QJsonObject fr = pv.toObject()["functionResponse"].toObject();
+                        const QString fn_name = fr["name"].toString();
+                        const int sep = fn_name.indexOf("__");
+                        const QString short_name = (sep >= 0) ? fn_name.mid(sep + 2) : fn_name;
+                        fallback += "\n**Tool: " + short_name + "**\n" +
+                                    QString::fromUtf8(
+                                        QJsonDocument(fr["response"].toObject()).toJson(QJsonDocument::Compact))
+                                        .left(4000) +
+                                    "\n";
+                    }
+                    resp.content = fallback;
                 }
             } else {
                 resp.content = extract_gemini_parts_text(parts);
@@ -657,6 +723,11 @@ LlmResponse LlmService::do_request(const QString& user_message, const std::vecto
                 loop_msgs.append(QJsonObject{{"role", "user"}, {"content", user_message}});
                 loop_msgs.append(msg); // assistant turn with tool_calls
 
+                // Tools the model has discovered this turn — seeded from this
+                // first round so the loop can re-declare them on the next turn
+                // (Tool RAG only ships Tier-0 otherwise; see note_tool_activations).
+                QSet<QString> activated;
+
                 for (const auto& tc_val : tcs) {
                     QJsonObject tc = tc_val.toObject();
                     QString call_id = tc["id"].toString();
@@ -671,13 +742,15 @@ LlmResponse LlmService::do_request(const QString& user_message, const std::vecto
                     LOG_INFO(kLlmSvcTag, QString("Tool %1 -> %2 (msg=%3 err=%4)")
                                       .arg(fn_name, tr.success ? "OK" : "FAIL",
                                            tr.message.left(120), tr.error.left(120)));
+                    const QString bare = mcp::McpProvider::parse_openai_function_name(fn_name).second;
+                    detail::note_tool_activations(bare, fn_args, tr, activated);
                     loop_msgs.append(QJsonObject{
                         {"role", "tool"},
                         {"tool_call_id", call_id},
                         {"content", QString::fromUtf8(QJsonDocument(tr.to_json()).toJson(QJsonDocument::Compact))}});
                 }
 
-                resp = do_tool_loop(loop_msgs, url, hdr);
+                resp = do_tool_loop(loop_msgs, url, hdr, activated);
                 parse_usage(resp, rj, provider_);
                 return resp;
 
@@ -764,9 +837,12 @@ LlmResponse LlmService::do_streaming_request(const QString& user_message,
     // `delta.content` wrapped in <think> tags. The user shouldn't see that —
     // only the answer. State persists across SSE chunks because tags can
     // straddle the chunk boundary ("<thi" + "nk>...").
+    // Returns the visible (answer) text; any reasoning found inside <think>…</think>
+    // is appended to *think_out so the caller can route it to the Thinking channel
+    // rather than dropping it.
     bool in_think = false;
     QString think_pending;
-    auto filter_think = [&](const QString& chunk) -> QString {
+    auto filter_think = [&](const QString& chunk, QString* think_out) -> QString {
         QString out;
         QString work = think_pending + chunk;
         think_pending.clear();
@@ -778,9 +854,13 @@ LlmResponse LlmService::do_streaming_request(const QString& user_message,
                 if (end < 0) {
                     // Hold last 8 chars in case </think> straddles.
                     qsizetype safe = std::max<qsizetype>(pos, n - 8);
+                    if (think_out)
+                        *think_out += work.mid(pos, safe - pos);
                     think_pending = work.mid(safe);
                     return out;
                 }
+                if (think_out)
+                    *think_out += work.mid(pos, end - pos);
                 in_think = false;
                 pos = end + 8;
             } else {
@@ -901,9 +981,15 @@ LlmResponse LlmService::do_streaming_request(const QString& user_message,
                 }
             }
 
-            QString chunk = parse_sse_chunk(data, provider_);
-            if (!chunk.isEmpty()) {
-                accumulated += chunk;
+            const SseDelta delta = parse_sse_chunk(data, provider_);
+            if (delta.is_reasoning) {
+                // Chain-of-thought (reasoning_content / Anthropic thinking_delta).
+                // Route to the UI's separate Thinking channel via the sentinel
+                // prefix; never accumulate it into the answer or stored content.
+                if (!delta.text.isEmpty())
+                    on_chunk(think_stream_prefix() + delta.text, false);
+            } else if (!delta.text.isEmpty()) {
+                accumulated += delta.text;
 
                 // Some providers stream tool calls as XML/text markup — detect, suppress output, fall back to do_request.
                 // Patterns covered: <tool_call>, </tool_call>, <minimax:tool_call>, <invoke name=,
@@ -923,7 +1009,13 @@ LlmResponse LlmService::do_streaming_request(const QString& user_message,
                     }
                 }
 
-                const QString visible = filter_think(chunk);
+                // Inline <think>…</think> reasoning (MiniMax M2.7, DeepSeek-R1
+                // derivatives) gets split out here: think_seg → Thinking channel,
+                // visible → answer bubble.
+                QString think_seg;
+                const QString visible = filter_think(delta.text, &think_seg);
+                if (!think_seg.isEmpty())
+                    on_chunk(think_stream_prefix() + think_seg, false);
                 if (!visible.isEmpty())
                     on_chunk(visible, false);
             }
@@ -966,10 +1058,23 @@ LlmResponse LlmService::do_streaming_request(const QString& user_message,
 
     int status = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
     if (reply->error() != QNetworkReply::NoError) {
-        resp.error = reply->errorString();
+        // A non-2xx (e.g. 400 from AIHubMix routing to a model that rejects a
+        // param) carries a JSON error body that explains why. The SSE reader
+        // never parses it because it isn't a "data:" line, so pull it from the
+        // unconsumed buffer + any remainder and surface the real reason instead
+        // of Qt's opaque "server replied: Bad Request".
+        const QByteArray err_body = partial_line + reply->readAll();
+        const QString server_msg = parse_server_error_message(err_body);
+        if (!server_msg.isEmpty())
+            resp.error = status > 0 ? QString("HTTP %1: %2").arg(status).arg(server_msg) : server_msg;
+        else
+            resp.error = reply->errorString();
         LOG_ERROR(kLlmSvcTag, "Stream request failed: " + resp.error);
     } else if (status >= 200 && status < 300) {
-        resp.content = accumulated;
+        // `accumulated` holds only answer deltas (reasoning_content was routed to
+        // the Thinking channel and never added here). Strip any inline <think>…
+        // </think> blocks so the persisted/replayed content is the answer alone.
+        resp.content = strip_think_blocks(accumulated);
         resp.success = true;
         if (!final_usage_obj.isEmpty()) {
             QJsonObject wrap{{"usage", final_usage_obj}};

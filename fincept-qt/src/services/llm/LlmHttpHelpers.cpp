@@ -4,6 +4,8 @@
 
 #include "services/llm/LlmService.h"
 
+#include "services/llm/LlmContentExtractors.h"
+
 #include <QCoreApplication>
 #include <QEvent>
 #include <QEventLoop>
@@ -19,6 +21,44 @@
 #include <QUrl>
 
 namespace fincept::ai_chat {
+
+// ── Provider error-body → message ──────────────────────────────────────────
+// Shared by the blocking (eventloop_request) and streaming (do_streaming_request)
+// paths so both surface the provider's real reason rather than Qt's generic
+// transport string.
+QString parse_server_error_message(const QByteArray& body) {
+    auto err_doc = QJsonDocument::fromJson(body);
+    if (err_doc.isNull() || !err_doc.isObject())
+        return {};
+    QJsonObject ej = err_doc.object();
+
+    QString server_msg;
+    // Top-level {"message": ...} (OpenAI/Anthropic legacy shape).
+    if (ej.contains("message") && ej["message"].isString())
+        server_msg = ej["message"].toString();
+
+    // Nested {"error": {"message": ..., "metadata": {"raw": ...}}}
+    // (OpenAI current, AIHubMix, OpenRouter, DeepSeek, Groq all use this shape).
+    if (server_msg.isEmpty() && ej.contains("error") && ej["error"].isObject()) {
+        QJsonObject eo = ej["error"].toObject();
+        if (eo.contains("message") && eo["message"].isString())
+            server_msg = eo["message"].toString();
+        // OpenRouter surfaces upstream errors in metadata.raw.
+        if (eo.contains("metadata") && eo["metadata"].isObject()) {
+            QJsonObject md = eo["metadata"].toObject();
+            QString raw = md["raw"].toString();
+            QString provider_name = md["provider_name"].toString();
+            if (!raw.isEmpty())
+                server_msg += " (upstream " + provider_name + ": " + raw + ")";
+        }
+    }
+
+    // Some gateways return {"error": "<string>"} — surface it verbatim.
+    if (server_msg.isEmpty() && ej.contains("error") && ej["error"].isString())
+        server_msg = ej["error"].toString();
+
+    return server_msg;
+}
 
 // ── Blocking POST ──────────────────────────────────────────────────────────
 // Background-thread only. Delegates to eventloop_request which works for
@@ -89,29 +129,7 @@ LlmService::HttpResult LlmService::eventloop_request(const QString& method, cons
     result.body    = reply->readAll();
     result.success = (result.status >= 200 && result.status < 300);
     if (!result.success) {
-        QString server_msg;
-        auto err_doc = QJsonDocument::fromJson(result.body);
-        if (!err_doc.isNull() && err_doc.isObject()) {
-            QJsonObject ej = err_doc.object();
-            // Top-level {"message": ...} (OpenAI/Anthropic legacy shape)
-            if (ej.contains("message") && ej["message"].isString())
-                server_msg = ej["message"].toString();
-            // Nested {"error": {"message": ..., "metadata": {"raw": ...}}}
-            // (OpenAI current, OpenRouter, DeepSeek, Groq all use this shape)
-            if (server_msg.isEmpty() && ej.contains("error") && ej["error"].isObject()) {
-                QJsonObject eo = ej["error"].toObject();
-                if (eo.contains("message") && eo["message"].isString())
-                    server_msg = eo["message"].toString();
-                // OpenRouter surfaces upstream errors in metadata.raw
-                if (eo.contains("metadata") && eo["metadata"].isObject()) {
-                    QJsonObject md = eo["metadata"].toObject();
-                    QString raw = md["raw"].toString();
-                    QString provider_name = md["provider_name"].toString();
-                    if (!raw.isEmpty())
-                        server_msg += " (upstream " + provider_name + ": " + raw + ")";
-                }
-            }
-        }
+        const QString server_msg = parse_server_error_message(result.body);
         result.error = server_msg.isEmpty() ? QString("HTTP %1: %2").arg(result.status).arg(reply->errorString())
                                             : QString("HTTP %1: %2").arg(result.status).arg(server_msg);
     }
@@ -139,7 +157,7 @@ QString strip_think_blocks(QString content) {
 }
 
 // ── SSE chunk → text ───────────────────────────────────────────────────────
-QString LlmService::parse_sse_chunk(const QString& data, const QString& provider) {
+LlmService::SseDelta LlmService::parse_sse_chunk(const QString& data, const QString& provider) {
     auto doc = QJsonDocument::fromJson(data.toUtf8());
     if (doc.isNull() || !doc.isObject())
         return {};
@@ -149,15 +167,16 @@ QString LlmService::parse_sse_chunk(const QString& data, const QString& provider
         // delta is a tagged union. text_delta carries the final answer;
         // thinking_delta carries the chain-of-thought for extended-thinking
         // models (claude-3-7 / claude-opus-4+ with `thinking` param). Surfacing
-        // both keeps the UI responsive during long reasoning phases. Other
-        // delta types (input_json_delta, signature_delta) must not be rendered.
+        // both keeps the UI responsive during long reasoning phases, but they
+        // must stay on SEPARATE channels so the UI doesn't mix reasoning into the
+        // answer. Other delta types (input_json_delta, signature_delta) aren't rendered.
         if (j["type"].toString() == "content_block_delta") {
             QJsonObject delta = j["delta"].toObject();
             const QString dtype = delta["type"].toString();
             if (dtype == "text_delta")
-                return delta["text"].toString();
+                return {delta["text"].toString(), false};
             if (dtype == "thinking_delta")
-                return delta["thinking"].toString();
+                return {delta["thinking"].toString(), true};
         }
         return {};
     }
@@ -169,22 +188,22 @@ QString LlmService::parse_sse_chunk(const QString& data, const QString& provider
         if (!delta["content"].isNull() && !delta["content"].isUndefined()) {
             QString s = delta["content"].toString();
             if (!s.isEmpty())
-                return s;
+                return {s, false};
         }
         // Reasoning models (kimi-k2.5 / kimi-k2.6 / kimi-k2-thinking*, deepseek-reasoner,
-        // grok-4 reasoning variants) stream their chain-of-thought as
+        // GLM / MiniMax / grok-4 reasoning variants) stream their chain-of-thought as
         // `delta.reasoning_content` and only emit `delta.content` after reasoning
-        // completes. Surface reasoning deltas so the user sees progress instead
-        // of a blank bubble for 10+ seconds.
+        // completes. Tag it as reasoning so the caller routes it to the separate,
+        // collapsible Thinking section instead of concatenating it into the answer.
         if (!delta["reasoning_content"].isNull() && !delta["reasoning_content"].isUndefined()) {
             QString s = delta["reasoning_content"].toString();
             if (!s.isEmpty())
-                return s;
+                return {s, true};
         }
         // Refusal deltas — newer OpenAI and some Groq safety paths stream a
         // `refusal` field in place of `content` when the model declines.
         if (!delta["refusal"].isNull() && !delta["refusal"].isUndefined())
-            return delta["refusal"].toString();
+            return {delta["refusal"].toString(), false};
     }
     return {};
 }

@@ -60,7 +60,8 @@ static constexpr int kUserColMaxWidth = 560;
 static constexpr int kAiColMaxWidth = 680;
 
 void AiChatScreen::on_typing_indicator_tick() {
-    static const QStringList states = {"AI is thinking", "AI is thinking·", "AI is thinking··", "AI is thinking···"};
+    const QStringList states = {tr("AI is thinking"), tr("AI is thinking·"),
+                                tr("AI is thinking··"), tr("AI is thinking···")};
     typing_step_ = (typing_step_ + 1) % states.size();
     typing_dots_lbl_->setText(states[typing_step_]);
 }
@@ -68,7 +69,7 @@ void AiChatScreen::on_typing_indicator_tick() {
 void AiChatScreen::show_typing(bool show) {
     if (show) {
         typing_step_ = 0;
-        typing_dots_lbl_->setText("AI is thinking");
+        typing_dots_lbl_->setText(tr("AI is thinking"));
         typing_indicator_->show();
         typing_timer_->start();
     } else {
@@ -89,12 +90,12 @@ void AiChatScreen::on_send() {
     if (active_session_id_.isEmpty())
         create_new_session();
     if (active_session_id_.isEmpty()) {
-        add_message_bubble("system", "Failed to create chat session. Please try again.");
+        add_message_bubble("system", tr("Failed to create chat session. Please try again."));
         return;
     }
     if (!ai_chat::LlmService::instance().is_configured()) {
         add_message_bubble("system",
-                           "No LLM provider configured. Go to Settings > LLM Configuration to set up a provider.");
+                           tr("No LLM provider configured. Go to Settings > LLM Configuration to set up a provider."));
         return;
     }
 
@@ -131,13 +132,21 @@ void AiChatScreen::on_send() {
                         text);
     }
 
+// Capture request‑time context for correct persistence
+    const QString req_session = active_session_id_;
+    const QString req_provider = ai_chat::LlmService::instance().active_provider();
+    const QString req_model = ai_chat::LlmService::instance().active_model();
+    // Store in member variables so on_streaming_done can use them
+    pending_req_session_ = req_session;
+    pending_req_provider_ = req_provider;
+    pending_req_model_ = req_model;
     input_box_->clear();
     input_box_->setFixedHeight(44);
     set_input_enabled(false);
     streaming_ = true;
     show_welcome(false);
     // Display only raw_text in bubble (not full file dump)
-    add_message_bubble("user", raw_text.isEmpty() ? "[File attached — see context]" : raw_text);
+    add_message_bubble("user", raw_text.isEmpty() ? tr("[File attached — see context]") : raw_text);
     total_messages_++;
     ChatRepository::instance().add_message(active_session_id_, "user", text,
                                            ai_chat::LlmService::instance().active_provider(),
@@ -147,6 +156,10 @@ void AiChatScreen::on_send() {
     // Show typing indicator while waiting for first chunk
     show_typing(true);
     scroll_to_bottom();
+
+    // Fresh Thinking section for this message (reasoning chunks land in a
+    // collapsible card created lazily by on_stream_chunk).
+    reset_thinking_state();
 
     std::vector<ai_chat::ConversationMessage> hist_copy = history_;
     const QString provider = ai_chat::LlmService::instance().active_provider();
@@ -160,12 +173,13 @@ void AiChatScreen::on_send() {
                     [self, chunk, done, first_chunk]() {
                         if (!self)
                             return;
-                        // On first chunk: hide typing indicator, show streaming bubble
+                        // On first chunk: hide the typing indicator. The answer
+                        // bubble and Thinking card are created lazily inside
+                        // on_stream_chunk so a leading reasoning chunk doesn't
+                        // spawn an empty answer bubble above the card.
                         if (*first_chunk && !chunk.isEmpty()) {
                             *first_chunk = false;
                             self->show_typing(false);
-                            self->streaming_bubble_ = self->add_streaming_bubble();
-                            self->scroll_to_bottom();
                         }
                         self->on_stream_chunk(chunk, done);
                     },
@@ -189,28 +203,44 @@ void AiChatScreen::on_send() {
 }
 
 void AiChatScreen::on_stream_chunk(const QString& chunk, bool done) {
-    // Snapshot QPointer to local — prevents TOCTOU between null-check and use.
-    QLabel* bubble = streaming_bubble_;
-    if (!bubble)
-        return;
-
-    // Tool-call clear sentinel: reset bubble content (removes partial XML)
-    if (chunk.startsWith("\x01__TOOL_CALL_CLEAR__")) {
-        fincept::ai_chat::ChatBubbleFactory::replace_streaming_text(bubble, "Calling tool...");
-        scroll_to_bottom();
-        return;
-    }
-
-    if (!chunk.isEmpty()) {
-        fincept::ai_chat::ChatBubbleFactory::append_streaming_chunk(bubble, chunk);
-        scroll_to_bottom();
-    }
     Q_UNUSED(done)
+
+    // Chain-of-thought chunk → separate, collapsible Thinking section (kept out
+    // of the answer bubble). Routed in-band via the think_stream_prefix sentinel.
+    const QString think_prefix = ai_chat::think_stream_prefix();
+    if (chunk.startsWith(think_prefix)) {
+        append_thinking_chunk(chunk.mid(think_prefix.size()));
+        scroll_to_bottom();
+        return;
+    }
+
+    // Tool-call clear sentinel: reset bubble content (removes partial XML).
+    if (chunk.startsWith("\x01__TOOL_CALL_CLEAR__")) {
+        if (!streaming_bubble_)
+            streaming_bubble_ = add_streaming_bubble();
+        fincept::ai_chat::ChatBubbleFactory::replace_streaming_text(streaming_bubble_, tr("Calling tool..."));
+        scroll_to_bottom();
+        return;
+    }
+
+    if (chunk.isEmpty())
+        return;
+
+    // Lazily create the answer bubble on the first real answer chunk so it lands
+    // below any Thinking card that arrived first.
+    if (!streaming_bubble_)
+        streaming_bubble_ = add_streaming_bubble();
+    fincept::ai_chat::ChatBubbleFactory::append_streaming_chunk(streaming_bubble_, chunk);
+    scroll_to_bottom();
 }
 
 void AiChatScreen::on_streaming_done(ai_chat::LlmResponse response) {
     streaming_ = false;
     show_typing(false);
+
+    // Lock in the Thinking card (swap the live "Thinking…" header for its final
+    // label) and stop tracking it so the next message starts a fresh one.
+    finalize_thinking_card();
 
     // Ensure a bubble exists for any terminal state (success + content,
     // failure with an error message, or success-but-empty). Without this,
@@ -229,8 +259,8 @@ void AiChatScreen::on_streaming_done(ai_chat::LlmResponse response) {
 
     if (!response.success) {
         if (streaming_bubble_) {
-            const QString err = response.error.isEmpty() ? QStringLiteral("Error: request failed")
-                                                         : (QStringLiteral("Error: ") + response.error);
+            const QString err = response.error.isEmpty() ? tr("Error: request failed")
+                                                         : tr("Error: %1").arg(response.error);
             fincept::ai_chat::ChatBubbleFactory::replace_streaming_text(streaming_bubble_, err);
         }
         LOG_WARN("AiChat", QString("LLM request failed: %1").arg(response.error));
@@ -241,7 +271,7 @@ void AiChatScreen::on_streaming_done(ai_chat::LlmResponse response) {
     // Success but empty body — surface a hint instead of silently doing nothing.
     if (response.content.isEmpty()) {
         if (streaming_bubble_) {
-            const QString hint = QStringLiteral("(empty response — model returned no content)");
+            const QString hint = tr("(empty response — model returned no content)");
             fincept::ai_chat::ChatBubbleFactory::replace_streaming_text(streaming_bubble_, hint);
         }
         LOG_WARN("AiChat", "LLM returned success with empty content");
@@ -264,9 +294,13 @@ void AiChatScreen::on_streaming_done(ai_chat::LlmResponse response) {
         total_messages_++;
         total_tokens_ += response.total_tokens;
         update_stats();
-        ChatRepository::instance().add_message(active_session_id_, "assistant", content,
-                                               ai_chat::LlmService::instance().active_provider(),
-                                               ai_chat::LlmService::instance().active_model(), response.total_tokens);
+        // Use request‑time captured context to persist the assistant message
+        ChatRepository::instance().add_message(pending_req_session_, "assistant", content,
+                                               pending_req_provider_, pending_req_model_, response.total_tokens);
+        // Clear pending request context to avoid accidental reuse
+        pending_req_session_.clear();
+        pending_req_provider_.clear();
+        pending_req_model_.clear();
     }
     scroll_to_bottom();
     input_box_->setFocus();
@@ -301,10 +335,96 @@ QLabel* AiChatScreen::add_streaming_bubble() {
     return b.body;
 }
 
+// ── Thinking (chain-of-thought) card ────────────────────────────────────────────
+// Reasoning models stream their thoughts on a separate channel (see
+// think_stream_prefix()). We collect them into a collapsed dropdown shown ABOVE
+// the answer bubble so the answer itself stays clean and unmixed.
+
+void AiChatScreen::create_thinking_card() {
+    if (thinking_card_)
+        return;
+
+    auto* card = new QWidget;
+    card->setMaximumWidth(kAiColMaxWidth);
+    card->setStyleSheet(QString("background:%1;border:1px solid %2;").arg(col::BG_SURFACE(), col::BORDER_DIM()));
+    auto* vl = new QVBoxLayout(card);
+    vl->setContentsMargins(10, 6, 10, 6);
+    vl->setSpacing(4);
+
+    // Collapsed by default — header toggles the body. The leading chevron (▸/▾)
+    // reflects expanded state; the body holds the dimmed, selectable reasoning.
+    auto* header = new QPushButton(QChar(0x25B8) + (QStringLiteral("  ") + QString::fromUtf8("\xF0\x9F\x92\xAD") + QStringLiteral(" ")) + tr("Thinking…"));
+    header->setCursor(Qt::PointingHandCursor);
+    header->setStyleSheet(QString("QPushButton{background:transparent;color:%1;border:none;"
+                                  "font-size:%2px;font-weight:600;text-align:left;padding:0;}"
+                                  "QPushButton:hover{color:%3;}")
+                              .arg(col::TEXT_TERTIARY())
+                              .arg(fnt::SMALL)
+                              .arg(col::TEXT_SECONDARY()));
+    vl->addWidget(header);
+
+    auto* body = new QLabel;
+    body->setWordWrap(true);
+    body->setTextInteractionFlags(Qt::TextSelectableByMouse);
+    body->setVisible(false);
+    body->setStyleSheet(QString("QLabel{color:%1;font-size:%2px;font-style:italic;background:transparent;}")
+                            .arg(col::TEXT_DIM())
+                            .arg(fnt::SMALL));
+    vl->addWidget(body);
+
+    // Capture raw pointers (not the QPointer members, which get nulled when the
+    // stream finishes) so the finished card stays toggleable.
+    QObject::connect(header, &QPushButton::clicked, card, [header, body]() {
+        const bool show = !body->isVisible();
+        body->setVisible(show);
+        QString t = header->text();
+        if (!t.isEmpty())
+            t.replace(0, 1, show ? QChar(0x25BE) : QChar(0x25B8));
+        header->setText(t);
+    });
+
+    // Insert just before the trailing stretch so it sits above the answer bubble
+    // (which is created lazily on the first answer chunk and lands below it).
+    messages_layout_->insertWidget(messages_layout_->count() - 1, card, 0, Qt::AlignLeft);
+    thinking_card_ = card;
+    thinking_header_ = header;
+    thinking_body_ = body;
+}
+
+void AiChatScreen::append_thinking_chunk(const QString& text) {
+    if (text.isEmpty())
+        return;
+    show_typing(false); // the card now signals activity
+    if (!thinking_card_)
+        create_thinking_card();
+    thinking_text_ += text;
+    if (thinking_body_)
+        thinking_body_->setText(thinking_text_);
+}
+
+void AiChatScreen::finalize_thinking_card() {
+    if (thinking_header_) {
+        const bool expanded = thinking_body_ && thinking_body_->isVisible();
+        const QChar chev = expanded ? QChar(0x25BE) : QChar(0x25B8);
+        thinking_header_->setText(chev + (QStringLiteral("  ") + QString::fromUtf8("\xF0\x9F\x92\xAD") + QStringLiteral(" ")) + tr("Thoughts"));
+    }
+    reset_thinking_state();
+}
+
+void AiChatScreen::reset_thinking_state() {
+    // Stops tracking the current card (the widget itself remains in the
+    // transcript); the next message creates a fresh one.
+    thinking_card_ = nullptr;
+    thinking_header_ = nullptr;
+    thinking_body_ = nullptr;
+    thinking_text_.clear();
+}
+
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
 void AiChatScreen::clear_messages() {
     streaming_bubble_.clear();
+    reset_thinking_state(); // card widgets are deleted by the loop below
     while (messages_layout_->count() > 1) {
         QLayoutItem* item = messages_layout_->takeAt(0);
         if (item->widget())
@@ -335,12 +455,12 @@ void AiChatScreen::set_input_enabled(bool enabled) {
     session_list_->setEnabled(enabled);
     delete_btn_->setEnabled(enabled && !active_session_id_.isEmpty());
     rename_btn_->setEnabled(enabled && !active_session_id_.isEmpty());
-    send_btn_->setText(enabled ? "Send" : "···");
+    send_btn_->setText(enabled ? tr("Send") : "···");
 
     // Status dot + label
     const QString status_color = enabled ? col::POSITIVE() : col::AMBER();
     hdr_status_dot_->setStyleSheet(QString("background:%1;border-radius:0px;").arg(status_color));
-    hdr_status_lbl_->setText(enabled ? "Ready" : "Streaming");
+    hdr_status_lbl_->setText(enabled ? tr("Ready") : tr("Streaming"));
     hdr_status_lbl_->setStyleSheet(
         QString("color:%1;font-size:%2px;font-weight:600;").arg(status_color).arg(fnt::SMALL));
 }
@@ -352,12 +472,12 @@ void AiChatScreen::update_stats() {
     else if (!active_session_id_.isEmpty())
         hdr_session_lbl_->setText(active_session_id_.left(8));
     else
-        hdr_session_lbl_->setText("New Conversation");
+        hdr_session_lbl_->setText(tr("New Conversation"));
 
     // Token count in header
     if (total_tokens_ > 0) {
-        hdr_tokens_lbl_->setText(total_tokens_ < 1000 ? QString("%1 tokens").arg(total_tokens_)
-                                                      : QString("%1k tokens").arg(total_tokens_ / 1000.0, 0, 'f', 1));
+        hdr_tokens_lbl_->setText(total_tokens_ < 1000 ? tr("%1 tokens").arg(total_tokens_)
+                                                      : tr("%1k tokens").arg(total_tokens_ / 1000.0, 0, 'f', 1));
     } else {
         hdr_tokens_lbl_->clear();
     }
@@ -368,10 +488,10 @@ void AiChatScreen::update_stats() {
         const bool is_fincept = (provider_raw.toLower() == "fincept");
 
         // Display names
-        const QString prov_display = is_fincept ? "Fincept LLM" : provider_raw.toUpper();
+        const QString prov_display = is_fincept ? tr("Fincept LLM") : provider_raw.toUpper();
         const QString model_raw = llm.active_model();
         // For fincept, don't expose internal model name
-        const QString model_display = is_fincept ? "Fincept LLM" : model_raw;
+        const QString model_display = is_fincept ? tr("Fincept LLM") : model_raw;
         QString model_short = model_display;
         if (model_short.length() > 24)
             model_short = model_short.left(22) + "..";
@@ -380,26 +500,26 @@ void AiChatScreen::update_stats() {
         provider_lbl_->setText(prov_display);
         provider_lbl_->setStyleSheet(
             QString("color:%1;font-size:%2px;font-weight:600;").arg(col::AMBER()).arg(fnt::SMALL));
-        model_lbl_->setText(is_fincept ? "Managed by Fincept" : model_short);
-        model_lbl_->setToolTip(is_fincept ? "Fincept LLM — managed AI service" : model_raw);
+        model_lbl_->setText(is_fincept ? tr("Managed by Fincept") : model_short);
+        model_lbl_->setToolTip(is_fincept ? tr("Fincept LLM — managed AI service") : model_raw);
         model_lbl_->setStyleSheet(QString("color:%1;font-size:%2px;").arg(col::TEXT_SECONDARY()).arg(fnt::TINY));
 
         // Header model pill — show "Provider / Model" for clarity
         if (is_fincept) {
-            hdr_model_lbl_->setText("Fincept LLM");
-            hdr_model_lbl_->setToolTip("Fincept managed AI service\n\nChange in Settings > LLM Configuration");
+            hdr_model_lbl_->setText(tr("Fincept LLM"));
+            hdr_model_lbl_->setToolTip(tr("Fincept managed AI service\n\nChange in Settings > LLM Configuration"));
         } else {
             hdr_model_lbl_->setText(provider_raw.left(1).toUpper() + provider_raw.mid(1) + " / " + model_short);
-            hdr_model_lbl_->setToolTip("Provider: " + prov_display + "\nModel: " + model_raw +
-                                       "\n\nChange in Settings > LLM Configuration");
+            hdr_model_lbl_->setToolTip(tr("Provider: %1\nModel: %2\n\nChange in Settings > LLM Configuration")
+                                           .arg(prov_display, model_raw));
         }
     } else {
-        provider_lbl_->setText("No provider");
+        provider_lbl_->setText(tr("No provider"));
         provider_lbl_->setStyleSheet(
             QString("color:%1;font-size:%2px;font-weight:600;").arg(col::NEGATIVE()).arg(fnt::SMALL));
-        model_lbl_->setText("Configure in Settings");
+        model_lbl_->setText(tr("Configure in Settings"));
         model_lbl_->setStyleSheet(QString("color:%1;font-size:%2px;").arg(col::TEXT_DIM()).arg(fnt::TINY));
-        hdr_model_lbl_->setText("No model");
+        hdr_model_lbl_->setText(tr("No model"));
     }
 }
 

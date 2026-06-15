@@ -49,6 +49,11 @@ class GrowwBroker : public IBroker {
 
     TokenExchangeResponse exchange_token(const QString& api_key, const QString& api_secret,
                                          const QString& auth_code) override;
+
+    // Daily token is derived from api_key + api_secret — silently re-mintable.
+    bool supports_silent_refresh() const override { return true; }
+    TokenExchangeResponse refresh_session(const BrokerCredentials& creds) override;
+
     OrderPlaceResponse place_order(const BrokerCredentials& creds, const UnifiedOrder& order) override;
     ApiResponse<QJsonObject> modify_order(const BrokerCredentials& creds, const QString& order_id,
                                           const QJsonObject& mods) override;
@@ -63,6 +68,16 @@ class GrowwBroker : public IBroker {
     ApiResponse<QVector<BrokerCandle>> get_history(const BrokerCredentials& creds, const QString& symbol,
                                                    const QString& resolution, const QString& from_date,
                                                    const QString& to_date) override;
+
+    // Batch multi-quotes — uses /v1/live-data/ltp + /v1/live-data/ohlc (max 50 per call)
+    ApiResponse<QVector<BrokerQuote>> get_multi_quotes(
+        const BrokerCredentials& creds,
+        const QVector<QPair<QString, QString>>& symbols) override;
+
+    // Market depth — GET /v1/live-data/quote includes bid/ask depth for single symbol
+    ApiResponse<MarketDepth> get_market_depth(
+        const BrokerCredentials& creds,
+        const QString& symbol, const QString& exchange) override;
 
     // Pre-trade margin calculator — POST /v1/margins/detail/orders?segment=...
     ApiResponse<OrderMargin> get_order_margins(const BrokerCredentials& creds, const UnifiedOrder& order) override;

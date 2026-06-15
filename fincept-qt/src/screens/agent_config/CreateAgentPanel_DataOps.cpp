@@ -165,7 +165,7 @@ void CreateAgentPanel::load_agent_into_form(const AgentConfig& cfg) {
     terminal_name_exclude_edit_->setText(exc_pats.isEmpty() ? QString() : exc_pats.first().toString());
     terminal_max_tools_spin_->setValue(tf["max_tools"].toInt(0));
 
-    status_lbl_->setText(QString("Loaded: %1").arg(cfg.name));
+    status_lbl_->setText(tr("Loaded: %1").arg(cfg.name));
     status_lbl_->setStyleSheet(QString("color:%1;font-size:10px;padding:3px 0;").arg(ui::colors::CYAN()));
 }
 
@@ -204,7 +204,7 @@ void CreateAgentPanel::clear_form() {
     terminal_max_tools_spin_->setValue(0);
     test_result_->clear();
     test_status_lbl_->clear();
-    status_lbl_->setText("Form cleared");
+    status_lbl_->setText(tr("Form cleared"));
     status_lbl_->setStyleSheet(QString("color:%1;font-size:10px;padding:3px 0;").arg(ui::colors::TEXT_TERTIARY()));
 }
 
@@ -332,7 +332,7 @@ QJsonObject CreateAgentPanel::build_config_json() const {
 void CreateAgentPanel::save_agent() {
     const QString name = name_edit_->text().trimmed();
     if (name.isEmpty()) {
-        status_lbl_->setText("Agent name is required");
+        status_lbl_->setText(tr("Agent name is required"));
         status_lbl_->setStyleSheet(QString("color:%1;font-size:10px;padding:3px 0;").arg(ui::colors::NEGATIVE()));
         return;
     }
@@ -364,16 +364,16 @@ void CreateAgentPanel::test_agent() {
     if (query.isEmpty())
         return;
     test_btn_->setEnabled(false);
-    test_btn_->setText("RUNNING...");
+    test_btn_->setText(tr("RUNNING..."));
     test_result_->clear();
-    test_status_lbl_->setText("Running...");
+    test_status_lbl_->setText(tr("Running..."));
     test_status_lbl_->setStyleSheet(QString("color:%1;font-size:10px;padding:2px 0;").arg(ui::colors::AMBER()));
     pending_request_id_ = services::AgentService::instance().run_agent_streaming(query, build_config_json());
 }
 
 void CreateAgentPanel::export_json() {
     const QString path =
-        QFileDialog::getSaveFileName(this, "Export Agent Config", "agent_config.json", "JSON (*.json)");
+        QFileDialog::getSaveFileName(this, tr("Export Agent Config"), "agent_config.json", tr("JSON (*.json)"));
     if (path.isEmpty())
         return;
     QJsonObject out;
@@ -384,12 +384,12 @@ void CreateAgentPanel::export_json() {
     QFile file(path);
     if (file.open(QIODevice::WriteOnly))
         file.write(QJsonDocument(out).toJson(QJsonDocument::Indented));
-    status_lbl_->setText("Exported: " + path);
+    status_lbl_->setText(tr("Exported: %1").arg(path));
     status_lbl_->setStyleSheet(QString("color:%1;font-size:10px;padding:3px 0;").arg(ui::colors::POSITIVE()));
 }
 
 void CreateAgentPanel::import_json() {
-    const QString path = QFileDialog::getOpenFileName(this, "Import Agent Config", {}, "JSON (*.json)");
+    const QString path = QFileDialog::getOpenFileName(this, tr("Import Agent Config"), {}, tr("JSON (*.json)"));
     if (path.isEmpty())
         return;
     QFile file(path);
@@ -403,8 +403,48 @@ void CreateAgentPanel::import_json() {
     cfg.category = obj["category"].toString("custom");
     cfg.config_json = QString::fromUtf8(QJsonDocument(obj["config"].toObject()).toJson(QJsonDocument::Compact));
     load_agent_into_form(cfg);
-    status_lbl_->setText("Imported from file");
+    status_lbl_->setText(tr("Imported from file"));
     status_lbl_->setStyleSheet(QString("color:%1;font-size:10px;padding:3px 0;").arg(ui::colors::CYAN()));
+}
+
+// ── Draft persistence (called by parent AgentConfigScreen::save_state) ───────
+
+QVariantMap CreateAgentPanel::save_draft() const {
+    QVariantMap d;
+    if (name_edit_) d["name"] = name_edit_->text();
+    if (desc_edit_) d["desc"] = desc_edit_->toPlainText();
+    if (instructions_edit_) d["instructions"] = instructions_edit_->toPlainText();
+    if (knowledge_urls_edit_) d["knowledge_urls"] = knowledge_urls_edit_->toPlainText();
+    if (memory_db_path_edit_) d["memory_db"] = memory_db_path_edit_->text();
+    if (memory_table_edit_) d["memory_table"] = memory_table_edit_->text();
+    if (storage_db_path_edit_) d["storage_db"] = storage_db_path_edit_->text();
+    if (storage_table_edit_) d["storage_table"] = storage_table_edit_->text();
+    if (agentic_memory_user_id_edit_) d["agentic_user_id"] = agentic_memory_user_id_edit_->text();
+    if (terminal_exclude_cats_edit_) d["term_exclude"] = terminal_exclude_cats_edit_->text();
+    if (terminal_name_include_edit_) d["term_include"] = terminal_name_include_edit_->text();
+    if (terminal_name_exclude_edit_) d["term_name_exclude"] = terminal_name_exclude_edit_->text();
+    if (test_query_edit_) d["test_query"] = test_query_edit_->toPlainText();
+    if (test_result_ && !test_result_->toPlainText().isEmpty())
+        d["test_result"] = test_result_->toPlainText();
+    return d;
+}
+
+void CreateAgentPanel::restore_draft(const QVariantMap& d) {
+    if (d.isEmpty()) return;
+    if (name_edit_ && d.contains("name")) name_edit_->setText(d["name"].toString());
+    if (desc_edit_ && d.contains("desc")) desc_edit_->setPlainText(d["desc"].toString());
+    if (instructions_edit_ && d.contains("instructions")) instructions_edit_->setPlainText(d["instructions"].toString());
+    if (knowledge_urls_edit_ && d.contains("knowledge_urls")) knowledge_urls_edit_->setPlainText(d["knowledge_urls"].toString());
+    if (memory_db_path_edit_ && d.contains("memory_db")) memory_db_path_edit_->setText(d["memory_db"].toString());
+    if (memory_table_edit_ && d.contains("memory_table")) memory_table_edit_->setText(d["memory_table"].toString());
+    if (storage_db_path_edit_ && d.contains("storage_db")) storage_db_path_edit_->setText(d["storage_db"].toString());
+    if (storage_table_edit_ && d.contains("storage_table")) storage_table_edit_->setText(d["storage_table"].toString());
+    if (agentic_memory_user_id_edit_ && d.contains("agentic_user_id")) agentic_memory_user_id_edit_->setText(d["agentic_user_id"].toString());
+    if (terminal_exclude_cats_edit_ && d.contains("term_exclude")) terminal_exclude_cats_edit_->setText(d["term_exclude"].toString());
+    if (terminal_name_include_edit_ && d.contains("term_include")) terminal_name_include_edit_->setText(d["term_include"].toString());
+    if (terminal_name_exclude_edit_ && d.contains("term_name_exclude")) terminal_name_exclude_edit_->setText(d["term_name_exclude"].toString());
+    if (test_query_edit_ && d.contains("test_query")) test_query_edit_->setPlainText(d["test_query"].toString());
+    if (test_result_ && d.contains("test_result")) test_result_->setPlainText(d["test_result"].toString());
 }
 
 } // namespace fincept::screens

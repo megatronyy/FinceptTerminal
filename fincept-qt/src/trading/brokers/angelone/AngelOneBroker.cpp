@@ -11,15 +11,19 @@
 #include "core/logging/Logger.h"
 #include "trading/adapter/BrokerEnumMap.h"
 #include "trading/brokers/BrokerHttp.h"
+#include "trading/brokers/BrokerTokenUtil.h"
 #include "trading/instruments/InstrumentService.h"
 
 #include <QCryptographicHash>
+#include <QDate>
 #include <QDateTime>
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QNetworkInterface>
 #include <QRegularExpression>
+
+#include <algorithm>
 
 namespace fincept::trading {
 
@@ -298,16 +302,34 @@ TokenExchangeResponse AngelOneBroker::exchange_token(const QString& api_key, con
     result.refresh_token = data.value("refreshToken").toString();
     result.user_id = client_code; // use client_code as stable login ID
 
-    // Pack feed_token, client_code, totp_secret into additional_data JSON
+    // Pack feed_token, client_code, totp_secret into additional_data JSON.
+    // Angel One's JWT access token is short-lived (~2.5h); the live sweep
+    // silent-relogins (TOTP) before/at expiry to keep the session alive.
     QJsonObject extra{
         {"feed_token", data.value("feedToken").toString()},
         {"client_code", client_code},
         {"totp_secret", totp_secret}, // persist so UI can pre-fill & token refresh can re-login
+        {"token_expires_at", static_cast<double>(rolling_expiry_epoch(2.5))},
     };
     result.additional_data = QString::fromUtf8(QJsonDocument(extra).toJson(QJsonDocument::Compact));
 
     LOG_INFO(TAG_AO, "Login success, user: " + result.user_id);
     return result;
+}
+
+// Silent refresh = replay the TOTP login from stored credentials (api_key,
+// MPIN, client_code, totp_secret). Yields a brand-new JWT with a fresh expiry.
+TokenExchangeResponse AngelOneBroker::refresh_session(const BrokerCredentials& creds) {
+    const auto extra = QJsonDocument::fromJson(creds.additional_data.toUtf8()).object();
+    const QString client_code = extra.value("client_code").toString();
+    const QString totp_secret = extra.value("totp_secret").toString();
+    if (client_code.isEmpty() || totp_secret.isEmpty()) {
+        return {false, "", "", "", "",
+                "Angel One silent refresh requires stored client code and TOTP secret"};
+    }
+    const QJsonObject auth{{"client_code", client_code}, {"totp_secret", totp_secret}};
+    return exchange_token(creds.api_key, creds.api_secret,
+                          QString::fromUtf8(QJsonDocument(auth).toJson(QJsonDocument::Compact)));
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -704,6 +726,193 @@ ApiResponse<QVector<BrokerQuote>> AngelOneBroker::get_quotes(const BrokerCredent
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// get_multi_quotes — batch quote with explicit exchange per symbol
+// AngelOne quote endpoint accepts exchangeTokens grouped by exchange.
+// Max 50 tokens per request; split into batches if needed.
+// ─────────────────────────────────────────────────────────────────────────────
+
+ApiResponse<QVector<BrokerQuote>> AngelOneBroker::get_multi_quotes(
+    const BrokerCredentials& creds,
+    const QVector<QPair<QString, QString>>& symbols) {
+    int64_t ts = QDateTime::currentSecsSinceEpoch();
+
+    // Resolve all tokens and group by exchange
+    struct TokenEntry {
+        QString exchange;
+        QString token;
+        QString original_symbol;
+    };
+    QVector<TokenEntry> entries;
+    entries.reserve(symbols.size());
+
+    for (const auto& [sym, exch] : symbols) {
+        QString exchange = exch.isEmpty() ? QStringLiteral("NSE") : exch;
+        QString token = lookup_token(sym, exchange);
+        if (token.isEmpty()) {
+            LOG_WARN(TAG_AO, QString("get_multi_quotes: token not found for %1:%2, skipping").arg(exchange, sym));
+            continue;
+        }
+        entries.append({exchange, token, sym});
+    }
+
+    if (entries.isEmpty())
+        return {false, std::nullopt, "No valid symbol tokens found", ts};
+
+    QVector<BrokerQuote> all_quotes;
+    const auto headers = auth_headers(creds);
+
+    // Batch in groups of 50 (AngelOne API limit)
+    static constexpr int BATCH_SIZE = 50;
+    for (int offset = 0; offset < entries.size(); offset += BATCH_SIZE) {
+        int end = qMin(offset + BATCH_SIZE, entries.size());
+
+        // Group this batch by exchange
+        QMap<QString, QJsonArray> by_exchange;
+        for (int i = offset; i < end; ++i)
+            by_exchange[entries[i].exchange].append(entries[i].token);
+
+        QJsonObject exchange_tokens;
+        for (auto it = by_exchange.constBegin(); it != by_exchange.constEnd(); ++it)
+            exchange_tokens[it.key()] = it.value();
+
+        QJsonObject payload{
+            {"mode", "FULL"},
+            {"exchangeTokens", exchange_tokens},
+        };
+
+        auto resp = BrokerHttp::instance().post_json(
+            BASE_AO + "/rest/secure/angelbroking/market/v1/quote", payload, headers);
+
+        if (!resp.success || !resp.json.value("status").toBool()) {
+            QString err = checked_error(resp, "get_multi_quotes batch failed");
+            LOG_ERROR(TAG_AO, err);
+            // If first batch fails, return error; otherwise return partial results
+            if (all_quotes.isEmpty())
+                return {false, std::nullopt, err, ts};
+            break;
+        }
+
+        auto fetched = resp.json.value("data").toObject().value("fetched").toArray();
+        for (const auto& v : fetched) {
+            auto q = v.toObject();
+            BrokerQuote quote;
+            // Strip -EQ/-BE suffix so symbol matches caller's input
+            {
+                QString sym = q.value("tradingSymbol").toString();
+                int dash = sym.lastIndexOf('-');
+                if (dash > 0)
+                    sym = sym.left(dash);
+                quote.symbol = sym;
+            }
+            quote.ltp = q.value("ltp").toDouble();
+            quote.open = q.value("open").toDouble();
+            quote.high = q.value("high").toDouble();
+            quote.low = q.value("low").toDouble();
+            quote.close = q.value("close").toDouble();
+            quote.volume = q.value("tradeVolume").toDouble();
+            quote.change = q.value("netChange").toDouble();
+            quote.change_pct = q.value("percentChange").toDouble();
+            // bid/ask from depth
+            auto depth = q.value("depth").toObject();
+            auto buy_arr = depth.value("buy").toArray();
+            auto sell_arr = depth.value("sell").toArray();
+            for (const auto& b : buy_arr) {
+                auto obj = b.toObject();
+                double p = obj.value("price").toDouble();
+                if (p > 0) {
+                    quote.bid = p;
+                    quote.bid_size = obj.value("quantity").toDouble();
+                    break;
+                }
+            }
+            for (const auto& s : sell_arr) {
+                auto obj = s.toObject();
+                double p = obj.value("price").toDouble();
+                if (p > 0) {
+                    quote.ask = p;
+                    quote.ask_size = obj.value("quantity").toDouble();
+                    break;
+                }
+            }
+            quote.timestamp = ts;
+            all_quotes.append(quote);
+        }
+    }
+
+    return {true, all_quotes, "", ts};
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// get_market_depth — Level 2 bid/ask via FULL quote mode
+// AngelOne returns best5BuyData / best5SellData + totalBuyQty / totalSellQty
+// ─────────────────────────────────────────────────────────────────────────────
+
+ApiResponse<MarketDepth> AngelOneBroker::get_market_depth(
+    const BrokerCredentials& creds,
+    const QString& symbol, const QString& exchange) {
+    int64_t ts = QDateTime::currentSecsSinceEpoch();
+
+    QString exch = exchange.isEmpty() ? QStringLiteral("NSE") : exchange;
+    QString token = lookup_token(symbol, exch);
+    if (token.isEmpty())
+        return {false, std::nullopt, "Symbol token not found for depth: " + exch + ":" + symbol, ts};
+
+    QJsonObject exchange_tokens;
+    exchange_tokens[exch] = QJsonArray{token};
+
+    QJsonObject payload{
+        {"mode", "FULL"},
+        {"exchangeTokens", exchange_tokens},
+    };
+
+    auto resp = BrokerHttp::instance().post_json(
+        BASE_AO + "/rest/secure/angelbroking/market/v1/quote", payload, auth_headers(creds));
+
+    if (!resp.success || !resp.json.value("status").toBool())
+        return {false, std::nullopt, checked_error(resp, "get_market_depth failed"), ts};
+
+    auto fetched = resp.json.value("data").toObject().value("fetched").toArray();
+    if (fetched.isEmpty())
+        return {false, std::nullopt, "No data returned for depth: " + exch + ":" + symbol, ts};
+
+    auto q = fetched[0].toObject();
+    MarketDepth md;
+    md.symbol = symbol;
+    md.exchange = exch;
+    md.ltp = q.value("ltp").toDouble();
+    md.volume = q.value("tradeVolume").toDouble();
+
+    // Parse depth arrays — AngelOne returns best5BuyData / best5SellData
+    // Each entry: { price, quantity, orders }
+    auto depth = q.value("depth").toObject();
+    auto buy_arr = depth.value("buy").toArray();
+    auto sell_arr = depth.value("sell").toArray();
+
+    // Also check for totalBuyQty / totalSellQty at top level
+    // (used for aggregate display; individual levels come from depth arrays)
+
+    for (const auto& b : buy_arr) {
+        auto obj = b.toObject();
+        DepthLevel level;
+        level.price = obj.value("price").toDouble();
+        level.quantity = static_cast<int>(obj.value("quantity").toDouble());
+        level.orders = static_cast<int>(obj.value("orders").toDouble());
+        md.bids.append(level);
+    }
+
+    for (const auto& s : sell_arr) {
+        auto obj = s.toObject();
+        DepthLevel level;
+        level.price = obj.value("price").toDouble();
+        level.quantity = static_cast<int>(obj.value("quantity").toDouble());
+        level.orders = static_cast<int>(obj.value("orders").toDouble());
+        md.asks.append(level);
+    }
+
+    return {true, md, "", ts};
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Get History (OHLCV candles)
 // resolution: "1m","3m","5m","10m","15m","30m","1h","1d"
 // ─────────────────────────────────────────────────────────────────────────────
@@ -746,42 +955,141 @@ ApiResponse<QVector<BrokerCandle>> AngelOneBroker::get_history(const BrokerCrede
     if (token.isEmpty())
         return {false, std::nullopt, "Symbol token not found for: " + symbol, ts};
 
-    QJsonObject payload{
-        {"exchange", exchange},  {"symboltoken", token}, {"interval", map_resolution(resolution)},
-        {"fromdate", from_date}, // "YYYY-MM-DD HH:MM"
-        {"todate", to_date},
+    // SmartAPI getCandleData requires fromdate/todate as "yyyy-MM-dd HH:mm".
+    // Pass through if already in that form; otherwise append session open/close
+    // to a bare "yyyy-MM-dd" date so Angel does not reject the request.
+    auto normalize_dt = [](const QString& s, const QString& def) -> QString {
+        if (QDateTime::fromString(s, "yyyy-MM-dd HH:mm").isValid())
+            return s;
+        QDate d = QDate::fromString(s, "yyyy-MM-dd");
+        if (d.isValid())
+            return d.toString("yyyy-MM-dd") + " " + def;
+        return s;
+    };
+    const QString from_norm = normalize_dt(from_date, "09:15");
+    const QString to_norm = normalize_dt(to_date, "15:30");
+
+    const QString interval = map_resolution(resolution);
+
+    // SmartAPI getCandleData caps the number of days per request, by interval.
+    // Larger ranges must be split into consecutive sub-windows and merged.
+    auto cap_days_for_interval = [](const QString& iv) -> int {
+        if (iv == "ONE_MINUTE")
+            return 30;
+        if (iv == "THREE_MINUTE")
+            return 60;
+        if (iv == "FIVE_MINUTE")
+            return 100;
+        if (iv == "TEN_MINUTE")
+            return 100;
+        if (iv == "FIFTEEN_MINUTE")
+            return 200;
+        if (iv == "THIRTY_MINUTE")
+            return 200;
+        if (iv == "ONE_HOUR")
+            return 400;
+        if (iv == "ONE_DAY")
+            return 2000;
+        return 2000;
+    };
+    const int cap_days = cap_days_for_interval(interval);
+
+    // POST + parse a single date window. `ok` reports request success so the
+    // caller can distinguish a first-window failure (hard error) from a later
+    // failure after data has already been collected (partial result).
+    auto fetch_window = [&](const QString& win_from, const QString& win_to, QVector<BrokerCandle>& out,
+                            bool& ok) -> QString {
+        QJsonObject payload{
+            {"exchange", exchange},   {"symboltoken", token}, {"interval", interval},
+            {"fromdate", win_from},   // "YYYY-MM-DD HH:MM"
+            {"todate", win_to},
+        };
+
+        auto resp = BrokerHttp::instance().post_json(BASE_AO + "/rest/secure/angelbroking/historical/v1/getCandleData",
+                                                     payload, auth_headers(creds));
+
+        if (!resp.success || !resp.json.value("status").toBool()) {
+            ok = false;
+            return checked_error(resp, "get_history failed");
+        }
+        ok = true;
+
+        // data is array of [timestamp, open, high, low, close, volume]
+        auto arr = resp.json.value("data").toArray();
+        for (const auto& v : arr) {
+            auto row = v.toArray();
+            if (row.size() < 6)
+                continue;
+            BrokerCandle c;
+            // AngelOne returns ISO 8601: "2025-03-03T00:00:00+05:30"
+            QString dt_str = row[0].toString();
+            QDateTime dt = QDateTime::fromString(dt_str, Qt::ISODate);
+            if (!dt.isValid())
+                dt = QDateTime::fromString(dt_str, "yyyy-MM-dd HH:mm");
+            if (!dt.isValid())
+                dt = QDateTime::fromString(dt_str, "yyyy-MM-ddTHH:mm:ss");
+            c.timestamp = dt.toMSecsSinceEpoch();
+            // AngelOne returns OHLCV as numbers (not strings)
+            c.open = row[1].toDouble();
+            c.high = row[2].toDouble();
+            c.low = row[3].toDouble();
+            c.close = row[4].toDouble();
+            c.volume = row[5].toDouble();
+            out.append(c);
+        }
+        return {};
     };
 
-    auto resp = BrokerHttp::instance().post_json(BASE_AO + "/rest/secure/angelbroking/historical/v1/getCandleData",
-                                                 payload, auth_headers(creds));
+    // Parse the normalized bounds back to QDateTime to measure the span. If
+    // either fails to parse, fall back to the original single-request behavior.
+    const QDateTime from_dt = QDateTime::fromString(from_norm, "yyyy-MM-dd HH:mm");
+    const QDateTime to_dt = QDateTime::fromString(to_norm, "yyyy-MM-dd HH:mm");
+    const bool bounds_ok = from_dt.isValid() && to_dt.isValid() && from_dt <= to_dt;
+    const qint64 span_days = bounds_ok ? from_dt.date().daysTo(to_dt.date()) : 0;
 
-    if (!resp.success || !resp.json.value("status").toBool())
-        return {false, std::nullopt, checked_error(resp, "get_history failed"), ts};
-
-    // data is array of [timestamp, open, high, low, close, volume]
     QVector<BrokerCandle> candles;
-    auto arr = resp.json.value("data").toArray();
-    for (const auto& v : arr) {
-        auto row = v.toArray();
-        if (row.size() < 6)
-            continue;
-        BrokerCandle c;
-        // AngelOne returns ISO 8601: "2025-03-03T00:00:00+05:30"
-        QString dt_str = row[0].toString();
-        QDateTime dt = QDateTime::fromString(dt_str, Qt::ISODate);
-        if (!dt.isValid())
-            dt = QDateTime::fromString(dt_str, "yyyy-MM-dd HH:mm");
-        if (!dt.isValid())
-            dt = QDateTime::fromString(dt_str, "yyyy-MM-ddTHH:mm:ss");
-        c.timestamp = dt.toMSecsSinceEpoch();
-        // AngelOne returns OHLCV as numbers (not strings)
-        c.open = row[1].toDouble();
-        c.high = row[2].toDouble();
-        c.low = row[3].toDouble();
-        c.close = row[4].toDouble();
-        c.volume = row[5].toDouble();
-        candles.append(c);
+
+    if (!bounds_ok || span_days <= cap_days) {
+        // Single request — identical to the original behavior.
+        bool ok = false;
+        QString err = fetch_window(from_norm, to_norm, candles, ok);
+        if (!ok)
+            return {false, std::nullopt, err, ts};
+        return {true, candles, "", ts};
     }
+
+    // Chunked: walk consecutive <=cap-day windows from `from_dt` to `to_dt`.
+    constexpr int MAX_ITERATIONS = 60;
+    QDateTime win_start = from_dt;
+    bool any_data = false;
+    for (int iter = 0; iter < MAX_ITERATIONS && win_start <= to_dt; ++iter) {
+        QDateTime win_end = win_start.addDays(cap_days);
+        if (win_end > to_dt)
+            win_end = to_dt;
+
+        bool ok = false;
+        QString err =
+            fetch_window(win_start.toString("yyyy-MM-dd HH:mm"), win_end.toString("yyyy-MM-dd HH:mm"), candles, ok);
+        if (!ok) {
+            if (!any_data)
+                return {false, std::nullopt, err, ts}; // first-window failure → hard error
+            break;                                     // later failure → return what we have
+        }
+        any_data = true;
+
+        if (win_end >= to_dt)
+            break;
+        // Advance one day past this window's end to avoid re-requesting the boundary day.
+        win_start = win_end.addDays(1);
+    }
+
+    // Sort ascending by timestamp and drop duplicate timestamps from window overlap.
+    std::sort(candles.begin(), candles.end(),
+              [](const BrokerCandle& a, const BrokerCandle& b) { return a.timestamp < b.timestamp; });
+    candles.erase(std::unique(candles.begin(), candles.end(),
+                              [](const BrokerCandle& a, const BrokerCandle& b) { return a.timestamp == b.timestamp; }),
+                  candles.end());
+
     return {true, candles, "", ts};
 }
 

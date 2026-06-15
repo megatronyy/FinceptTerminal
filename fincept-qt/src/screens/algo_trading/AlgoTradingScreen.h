@@ -1,8 +1,10 @@
 // src/screens/algo_trading/AlgoTradingScreen.h
 #pragma once
+#include "screens/algo_trading/AlertsPanel.h"
 #include "screens/common/IStatefulScreen.h"
 #include "services/algo_trading/AlgoTradingTypes.h"
 
+#include <QEvent>
 #include <QHideEvent>
 #include <QLabel>
 #include <QPushButton>
@@ -17,9 +19,10 @@ class StrategyBuilderPanel;
 class StrategyListPanel;
 class ScannerPanel;
 class DeploymentDashboard;
+class UniverseScannerPanel;
 
-/// Algo Trading screen — 4-tab trading system builder.
-/// Tabs: Builder, My Strategies, Scanner, Dashboard
+/// Algo Trading screen — 6-tab trading system builder.
+/// Tabs: Builder, My Strategies, Scanner, Alerts, Dashboard, Universe
 class AlgoTradingScreen : public QWidget, public IStatefulScreen {
     Q_OBJECT
   public:
@@ -33,6 +36,7 @@ class AlgoTradingScreen : public QWidget, public IStatefulScreen {
   protected:
     void showEvent(QShowEvent* event) override;
     void hideEvent(QHideEvent* event) override;
+    void changeEvent(QEvent* event) override;
 
   private slots:
     void on_tab_changed(int index);
@@ -42,15 +46,21 @@ class AlgoTradingScreen : public QWidget, public IStatefulScreen {
     QWidget* build_top_bar();
     QWidget* build_status_bar();
     void update_tab_buttons();
+    void retranslateUi();
 
     QStackedWidget* content_stack_ = nullptr;
     StrategyBuilderPanel* builder_ = nullptr;
     StrategyListPanel* strategies_ = nullptr;
     ScannerPanel* scanner_ = nullptr;
+    AlertsPanel* alerts_ = nullptr;
     DeploymentDashboard* dashboard_ = nullptr;
+    UniverseScannerPanel* universe_ = nullptr;
 
     QVector<QPushButton*> tab_buttons_;
     int active_tab_ = 0;
+    int active_deployments_ = 0;
+    QLabel* title_label_ = nullptr;
+    QLabel* engine_caption_ = nullptr;
     QLabel* deploy_count_label_ = nullptr;
     QLabel* status_label_ = nullptr;
     QTimer* poll_timer_ = nullptr;

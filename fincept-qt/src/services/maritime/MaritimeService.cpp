@@ -1,6 +1,7 @@
 // src/services/maritime/MaritimeService.cpp
 #include "services/maritime/MaritimeService.h"
 
+#include "core/config/AppConfig.h"
 #include "core/logging/Logger.h"
 #include "network/http/HttpClient.h"
 #include "storage/cache/CacheManager.h"
@@ -21,7 +22,9 @@ inline void publish_to_hub(const QString& topic, const QVariant& value) {
 }
 }  // namespace
 
-static constexpr const char* kMarineBase = "https://api.fincept.in/marine";
+static QString marine_base() {
+    return fincept::AppConfig::instance().api_base_url() + QStringLiteral("/marine");
+}
 static constexpr int kVesselTtlSec = 60;      // position data: 1 min
 static constexpr int kHistoryTtlSec = 5 * 60; // history: 5 min
 
@@ -77,11 +80,18 @@ void MaritimeService::search_vessels_by_area(const AreaSearchParams& params) {
     body["max_lng"] = params.max_lng;
     if (params.days_ago > 0)
         body["days_ago"] = params.days_ago;
+    if (params.limit > 0)
+        body["limit"] = params.limit;
 
-    const QString cache_key = QString("maritime:area:%1:%2:%3:%4:%5")
+    const QString cache_key = QString("maritime:area:%1:%2:%3:%4:%5:%6")
                                   .arg(params.min_lat).arg(params.max_lat)
                                   .arg(params.min_lng).arg(params.max_lng)
-                                  .arg(params.days_ago);
+                                  .arg(params.days_ago).arg(params.limit);
+
+    // Client-side safety net: if the API ignores `limit` and returns the full
+    // unbounded set, cap the working set before we parse/sort/re-serialize so
+    // the UI thread never chews through tens of thousands of vessels.
+    const int hard_cap = params.limit > 0 ? params.limit : 0;
     const QVariant cached = fincept::CacheManager::instance().get(cache_key);
     if (!cached.isNull()) {
         const QJsonObject root = QJsonDocument::fromJson(cached.toString().toUtf8()).object();
@@ -99,8 +109,8 @@ void MaritimeService::search_vessels_by_area(const AreaSearchParams& params) {
 
     QPointer<MaritimeService> self = this;
     HttpClient::instance().post(
-        QString(kMarineBase) + "/vessel/area-search", body,
-        [self, cache_key](Result<QJsonDocument> result) {
+        marine_base() + "/vessel/area-search", body,
+        [self, cache_key, hard_cap](Result<QJsonDocument> result) {
             if (!self)
                 return;
             if (!result.is_ok()) {
@@ -111,10 +121,16 @@ void MaritimeService::search_vessels_by_area(const AreaSearchParams& params) {
             const auto data = unwrap(result.value().object());
             const auto vessels_arr = data["vessels"].toArray();
 
+            // Parse at most `hard_cap` vessels (0 = unbounded). Caps the
+            // per-vessel parse + downstream sort/re-serialize work when the
+            // server returns the full unbounded set despite the limit param.
+            const int parse_n = (hard_cap > 0)
+                                    ? std::min<int>(hard_cap, vessels_arr.size())
+                                    : vessels_arr.size();
             VesselsPage page;
-            page.vessels.reserve(vessels_arr.size());
-            for (const auto& v : vessels_arr)
-                page.vessels.append(self->parse_vessel(v.toObject()));
+            page.vessels.reserve(parse_n);
+            for (int i = 0; i < parse_n; ++i)
+                page.vessels.append(self->parse_vessel(vessels_arr[i].toObject()));
 
             // Newest position first — last_pos_updated_at is ISO-8601 so plain
             // string compare gives correct lexicographic ordering.
@@ -188,7 +204,7 @@ void MaritimeService::get_vessel_position(const QString& imo) {
     QPointer<MaritimeService> self = this;
     const QString imo_trimmed = imo.trimmed();
     HttpClient::instance().post(
-        QString(kMarineBase) + "/vessel/position", body,
+        marine_base() + "/vessel/position", body,
         [self, cache_key, imo_trimmed](Result<QJsonDocument> result) {
             if (!self)
                 return;
@@ -241,7 +257,7 @@ void MaritimeService::get_multi_vessel_positions(const QStringList& imos) {
 
     QPointer<MaritimeService> self = this;
     HttpClient::instance().post(
-        QString(kMarineBase) + "/vessel/multi", body, [self, cache_key](Result<QJsonDocument> result) {
+        marine_base() + "/vessel/multi", body, [self, cache_key](Result<QJsonDocument> result) {
             if (!self)
                 return;
             if (!result.is_ok()) {
@@ -333,7 +349,7 @@ void MaritimeService::get_vessel_history(const QString& imo) {
 
     QPointer<MaritimeService> self = this;
     HttpClient::instance().post(
-        QString(kMarineBase) + "/vessel/history", body,
+        marine_base() + "/vessel/history", body,
         [self, cache_key, imo_trimmed](Result<QJsonDocument> result) {
             if (!self)
                 return;
@@ -404,7 +420,7 @@ void MaritimeService::get_vessel_history(const QString& imo) {
 // ── Health check ─────────────────────────────────────────────────────────────
 void MaritimeService::check_health() {
     QPointer<MaritimeService> self = this;
-    HttpClient::instance().get(QString(kMarineBase) + "/health", [self](Result<QJsonDocument> result) {
+    HttpClient::instance().get(marine_base() + "/health", [self](Result<QJsonDocument> result) {
         if (!self)
             return;
         if (!result.is_ok()) {

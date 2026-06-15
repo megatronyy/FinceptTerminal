@@ -6,6 +6,7 @@
 #include "ui/theme/Theme.h"
 
 #include <QAreaSeries>
+#include <QTabBar>
 #include <QChart>
 #include <QChartView>
 #include <QDateTimeAxis>
@@ -120,6 +121,9 @@ void PortfolioFFNView::build_ui() {
 
     // ── Tabs ──────────────────────────────────────────────────────────────────
     tabs_ = new QTabWidget;
+    tabs_->tabBar()->setElideMode(Qt::ElideNone);
+    tabs_->tabBar()->setExpanding(false);
+    tabs_->tabBar()->setUsesScrollButtons(false);
     tabs_->setDocumentMode(true);
     tabs_->setStyleSheet(QString("QTabWidget::pane { border:0; background:%1; }"
                                  "QTabBar::tab { background:%2; color:%3; padding:6px 14px; border:0;"
@@ -449,7 +453,10 @@ void PortfolioFFNView::update_overview() {
             }
         double daily_vol = vn > 0 ? vol / vn : 0.0;
         double ann_vol = daily_vol * std::sqrt(252.0);
-        double sharpe = ann_vol > 0.01 ? (pnl_pct - 4.0) / ann_vol : 0.0;
+        // Rough Sharpe estimate in percent units; mirrors PortfolioService's
+        // kDefaultRiskFreeRate (0.04 → 4%) — keep in sync if that default changes.
+        constexpr double kRoughRfRatePct = 4.0;
+        double sharpe = ann_vol > 0.01 ? (pnl_pct - kRoughRfRatePct) / ann_vol : 0.0;
 
         rows = {
             {tr("Total Return (unrealized)"), pct_str(pnl_pct / 100.0), "--",

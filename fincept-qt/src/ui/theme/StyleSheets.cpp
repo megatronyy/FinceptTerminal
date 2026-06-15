@@ -48,6 +48,29 @@ QString muted_button() {
         .arg(colors::PANEL(), colors::MUTED(), colors::BORDER(), colors::BG_RAISED(), colors::GRAY());
 }
 
+QString fno_dense_table() {
+    return QString(
+        "QTableView { background:%1; color:%2; border:none; gridline-color:transparent; "
+        "  alternate-background-color:%3; font-size:11px; "
+        "  selection-background-color:%4; selection-color:%2; }"
+        "QTableView::item { padding:0 6px; border:none; }"
+        "QTableView::item:hover { background:%4; }"
+        "QHeaderView::section { background:%5; color:%6; border:none; "
+        "  border-bottom:1px solid %7; padding:2px 6px; "
+        "  font-size:9px; font-weight:700; letter-spacing:0.4px; }"
+        "QScrollBar:vertical { background:%1; width:6px; margin:0; }"
+        "QScrollBar::handle:vertical { background:%7; min-height:20px; border-radius:3px; }"
+        "QScrollBar::handle:vertical:hover { background:%6; }"
+        "QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height:0; }")
+        .arg(colors::BG_BASE(),        // %1
+             colors::TEXT_PRIMARY(),   // %2
+             colors::ROW_ALT(),        // %3
+             colors::BG_HOVER(),       // %4
+             colors::BG_RAISED(),      // %5
+             colors::TEXT_SECONDARY(), // %6
+             colors::BORDER_DIM());    // %7
+}
+
 QString news_screen_styles() {
     return QString(
                /* ── NewsScreen root ── */
@@ -193,11 +216,16 @@ QString news_screen_styles() {
                "  border: 1px solid %10; font-size: 11px; font-weight: 700; padding: 0 10px; }"
                "#newsDetailAnalyzeBtn:hover { background: %12; color: %1; }"
                "#newsDetailAnalyzeBtn:disabled { color: %6; background: %8; border-color: %3; }"
-               "#newsDetailAiSummary { color: %7; font-size: 12px; background: transparent; }"
+               "#newsDetailAiFetchNote { color: %16; font-size: 10px; background: rgba(217,119,6,0.08); "
+               "  border-left: 2px solid %16; padding: 3px 6px; }"
+               "#newsDetailAiSummary { color: %7; font-size: 12px; line-height: 1.4; background: transparent; }"
                "#newsDetailAiSentiment { font-size: 12px; font-weight: 700; background: transparent; }"
                "#newsDetailAiUrgency { color: %16; font-size: 12px; background: transparent; }"
+               "#newsDetailAiConfidence { color: %7; font-size: 12px; background: transparent; }"
                "#newsDetailKeyPoint { color: %7; font-size: 11px; background: transparent; }"
-               "#newsDetailRisk { color: %11; font-size: 11px; background: transparent; }"
+               "#newsDetailRisk { font-size: 11px; background: transparent; }"
+               "#newsDetailRiskDetail { color: %6; font-size: 10px; background: transparent; padding-left: 8px; }"
+               "#newsDetailEntity { color: %14; font-size: 11px; background: transparent; }"
                "#newsDetailTopicBadge { color: %14; font-size: 10px; background: %8; "
                "  border: 1px solid %3; padding: 1px 6px; }"
                "#newsRelatedBtn { background: transparent; color: %7; font-size: 11px; "
@@ -634,62 +662,85 @@ QString equity_trading_styles() {
                "#eqObHeader { background: %8; border-bottom: 1px solid %3; }"
                "#eqObTitle { color: %12; font-weight: 700; font-size: 11px; "
                "  letter-spacing: 0.5px; background: transparent; border: none; }"
-               "#eqObSpread { background: %8; color: %7; font-size: 11px; font-weight: 700; "
-               "  border-top: 1px solid %3; border-bottom: 1px solid %3; }"
+               "#eqObLevels { color: %9; font-size: 10px; font-weight: 600; "
+               "  letter-spacing: 0.3px; background: transparent; border: none; }"
+               "#eqObCanvas { background: transparent; }"
 
                /* ── Order entry ── */
                "#eqOrderEntry { background: %2; border: 1px solid %3; }"
                "#eqOeHeader { background: %8; border-bottom: 1px solid %3; }"
                "#eqOeTitle { color: %12; font-weight: 700; font-size: 11px; "
                "  letter-spacing: 0.5px; background: transparent; border: none; }"
-               "#eqOeMode { font-weight: 700; font-size: 11px; letter-spacing: 0.5px; "
+               "#eqOeMode { font-weight: 700; font-size: 10px; letter-spacing: 0.5px; "
+               "  background: %1; border: 1px solid %3; border-radius: 3px; padding: 2px 8px; }"
+               "#eqOeScroll { background: %2; border: none; }"
+               "#eqOeContent { background: %2; }"
+               "#eqOeSep { background: %3; border: none; }"
+
+               /* BUY / SELL — filled segmented toggle */
+               "#eqBuyTab { background: %1; color: %7; border: 1px solid %3; border-right: none; "
+               "  border-top-left-radius: 4px; border-bottom-left-radius: 4px; "
+               "  font-size: 13px; font-weight: 800; letter-spacing: 1px; }"
+               "#eqBuyTab:hover { color: %15; background: %17; }"
+               "#eqBuyTab[active=\"true\"] { background: %15; color: #ffffff; border-color: %15; }"
+               "#eqSellTab { background: %1; color: %7; border: 1px solid %3; "
+               "  border-top-right-radius: 4px; border-bottom-right-radius: 4px; "
+               "  font-size: 13px; font-weight: 800; letter-spacing: 1px; }"
+               "#eqSellTab:hover { color: %11; background: %18; }"
+               "#eqSellTab[active=\"true\"] { background: %11; color: #ffffff; border-color: %11; }"
+
+               /* Order type — filled chips */
+               "#eqOeTypeBtn { background: %1; color: %7; border: 1px solid %3; border-radius: 3px; "
+               "  padding: 2px 4px; font-size: 11px; font-weight: 700; }"
+               "#eqOeTypeBtn:hover { color: %4; border-color: %5; }"
+               "#eqOeTypeBtn[active=\"true\"] { background: %12; color: #ffffff; border-color: %12; }"
+
+               /* Symbol context line */
+               "#eqOeSymbol { color: %4; font-size: 12px; font-weight: 700; letter-spacing: 0.5px; "
+               "  background: transparent; border: none; padding: 1px 0; }"
+
+               /* Live info box — LTP + balance, bright */
+               "#eqOeInfo { background: %1; border: 1px solid %3; border-radius: 4px; }"
+               "#eqOeMarketPrice { color: %14; font-size: 13px; font-weight: 700; "
                "  background: transparent; border: none; }"
-
-               "#eqBuyTab { background: transparent; color: %6; border: none; "
-               "  border-bottom: 2px solid transparent; padding: 4px 0; "
-               "  font-size: 12px; font-weight: 700; }"
-               "#eqBuyTab:hover { color: %15; }"
-               "#eqBuyTab[active=\"true\"] { color: %15; border-bottom-color: %15; }"
-               "#eqSellTab { background: transparent; color: %6; border: none; "
-               "  border-bottom: 2px solid transparent; padding: 4px 0; "
-               "  font-size: 12px; font-weight: 700; }"
-               "#eqSellTab:hover { color: %11; }"
-               "#eqSellTab[active=\"true\"] { color: %11; border-bottom-color: %11; }"
-
-               "#eqOeTypeBtn { background: transparent; color: %6; border: none; "
-               "  border-bottom: 2px solid transparent; padding: 1px 6px; "
-               "  font-size: 10px; font-weight: 700; }"
-               "#eqOeTypeBtn:hover { color: %7; }"
-               "#eqOeTypeBtn[active=\"true\"] { color: %4; border-bottom-color: %12; }"
+               "#eqOeBalance { color: %4; font-size: 13px; font-weight: 700; "
+               "  background: transparent; border: none; }"
 
                "#eqOeLabel { color: %7; font-size: 11px; font-weight: 700; "
                "  letter-spacing: 0.5px; background: transparent; border: none; }"
                "#eqOeInput { background: %1; border: 1px solid %3; color: %4; "
-               "  padding: 3px 6px; font-size: 12px; }"
+               "  border-radius: 3px; padding: 4px 6px; font-size: 13px; }"
                "#eqOeInput:focus { border-color: %5; }"
-               "#eqOeInput:disabled { color: %9; }"
+               "#eqOeInput:disabled { color: %9; background: %2; }"
                "#eqOeCombo { background: %1; border: 1px solid %3; color: %4; "
-               "  padding: 3px 6px; font-size: 12px; }"
+               "  border-radius: 3px; padding: 4px 6px; font-size: 13px; }"
                "#eqOeCombo:focus { border-color: %5; }"
+               "#eqOeCombo::drop-down { border: none; width: 18px; }"
                "#eqOeCombo QAbstractItemView { background: %2; color: %4; "
                "  selection-background-color: %13; border: 1px solid %3; }"
 
-               "#eqOeBalance { color: %14; font-size: 12px; font-weight: 700; "
+               "#eqOeBrokerage { color: %7; font-size: 11px; background: transparent; border: none; }"
+
+               /* Cost / margin summary */
+               "#eqOeSummary { background: %1; border: 1px solid %3; border-radius: 4px; }"
+               "#eqOeCost { color: %4; font-size: 13px; font-weight: 700; "
                "  background: transparent; border: none; }"
-               "#eqOeMarketPrice { color: %6; font-size: 11px; background: transparent; border: none; }"
-               "#eqOeCost { color: %6; font-size: 11px; background: transparent; border: none; }"
-               "#eqOeStatus { font-size: 11px; background: transparent; border: none; }"
+               "#eqOeMargin { color: %7; font-size: 11px; background: transparent; border: none; }"
+               "#eqOeStatus { font-size: 11px; font-weight: 600; background: transparent; border: none; }"
 
-               "#eqBuySubmit { background: %17; color: %15; "
-               "  border: 1px solid %19; padding: 8px; font-weight: 700; font-size: 13px; }"
-               "#eqBuySubmit:hover { background: %15; color: %1; }"
-               "#eqSellSubmit { background: %18; color: %11; "
-               "  border: 1px solid %20; padding: 8px; font-weight: 700; font-size: 13px; }"
-               "#eqSellSubmit:hover { background: %11; color: %4; }"
+               /* Submit — filled buy/sell */
+               "#eqBuySubmit { background: %15; color: #ffffff; "
+               "  border: 1px solid %15; border-radius: 4px; padding: 10px; "
+               "  font-weight: 800; font-size: 13px; letter-spacing: 0.5px; }"
+               "#eqBuySubmit:hover { background: %15; border-color: %4; }"
+               "#eqSellSubmit { background: %11; color: #ffffff; "
+               "  border: 1px solid %11; border-radius: 4px; padding: 10px; "
+               "  font-weight: 800; font-size: 13px; letter-spacing: 0.5px; }"
+               "#eqSellSubmit:hover { background: %11; border-color: %4; }"
 
-               "#eqAdvToggle { background: transparent; color: %6; border: none; "
-               "  font-size: 10px; font-weight: 700; letter-spacing: 0.5px; padding: 2px 0; }"
-               "#eqAdvToggle:hover { color: %7; }"
+               "#eqAdvToggle { background: transparent; color: %7; border: none; "
+               "  font-size: 11px; font-weight: 700; letter-spacing: 0.5px; padding: 3px 0; text-align: left; }"
+               "#eqAdvToggle:hover { color: %12; }"
 
                /* ── Bottom panel ── */
                "#eqBottomPanel { background: %2; border: 1px solid %3; }"

@@ -3,6 +3,7 @@
 #include "core/logging/Logger.h"
 #include "datahub/DataHub.h"
 #include "datahub/DataHubMetaTypes.h"
+#include "services/options/OptionChainService.h"
 #include "screens/fno/IntradayOIChart.h"
 #include "screens/fno/MaxPainChart.h"
 #include "screens/fno/MultiStrikeOIChart.h"
@@ -10,6 +11,7 @@
 #include "ui/theme/Theme.h"
 
 #include <QComboBox>
+#include <QCoreApplication>
 #include <QHBoxLayout>
 #include <QHideEvent>
 #include <QLabel>
@@ -33,7 +35,7 @@ namespace {
 QString strike_label(const OptionChainRow& row) {
     QString s = QString::number(row.strike, 'f', row.strike < 100 ? 2 : 0);
     if (row.is_atm)
-        s += "  (ATM)";
+        s += "  " + QCoreApplication::translate("OISubTab", "(ATM)");
     return s;
 }
 
@@ -58,6 +60,17 @@ OISubTab::OISubTab(QWidget* parent) : QWidget(parent) {
                            colors::AMBER()));
 
     setup_ui();
+
+    connect(&fincept::services::options::OptionChainService::instance(),
+            &fincept::services::options::OptionChainService::chain_published,
+            this, [this](const OptionChain& chain) {
+                on_chain_published({}, QVariant::fromValue(chain));
+            });
+    subscribed_ = true;
+
+    const auto& cached = fincept::services::options::OptionChainService::instance().last_chain();
+    if (!cached.rows.isEmpty())
+        on_chain_published({}, QVariant::fromValue(cached));
 }
 
 OISubTab::~OISubTab() {
@@ -98,10 +111,10 @@ void OISubTab::setup_ui() {
     auto* picker_row = new QHBoxLayout();
     picker_row->setContentsMargins(0, 0, 0, 0);
     picker_row->setSpacing(8);
-    auto* picker_lbl = new QLabel("STRIKE", intraday_wrap);
-    picker_lbl->setObjectName("fnoOIPickerLabel");
+    picker_lbl_ = new QLabel(tr("STRIKE"), intraday_wrap);
+    picker_lbl_->setObjectName("fnoOIPickerLabel");
     strike_combo_ = new QComboBox(intraday_wrap);
-    picker_row->addWidget(picker_lbl);
+    picker_row->addWidget(picker_lbl_);
     picker_row->addWidget(strike_combo_);
     picker_row->addStretch(1);
     intraday_lay->addLayout(picker_row);
@@ -152,10 +165,24 @@ void OISubTab::showEvent(QShowEvent* e) {
 
 void OISubTab::hideEvent(QHideEvent* e) {
     QWidget::hideEvent(e);
-    if (!subscribed_)
-        return;
-    fincept::datahub::DataHub::instance().unsubscribe_pattern(this, QStringLiteral("option:chain:*"));
-    subscribed_ = false;
+}
+
+void OISubTab::changeEvent(QEvent* event) {
+    if (event->type() == QEvent::LanguageChange)
+        retranslateUi();
+    QWidget::changeEvent(event);
+}
+
+void OISubTab::retranslateUi() {
+    if (picker_lbl_) picker_lbl_->setText(tr("STRIKE"));
+    // Rebuild the combo so the "(ATM)" suffix picks up the new language,
+    // preserving the current selection.
+    if (strike_combo_ && strike_combo_->count() > 0 && !last_chain_.rows.isEmpty()) {
+        const int keep = strike_combo_->currentIndex();
+        rebuild_strike_combo(last_chain_);
+        if (keep >= 0 && keep < strike_combo_->count())
+            strike_combo_->setCurrentIndex(keep);
+    }
 }
 
 void OISubTab::on_chain_published(const QString& topic, const QVariant& v) {

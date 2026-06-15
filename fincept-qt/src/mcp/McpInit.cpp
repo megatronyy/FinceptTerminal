@@ -20,6 +20,7 @@
 #include "mcp/tools/ForumTools.h"
 #include "mcp/tools/GeopoliticsTools.h"
 #include "mcp/tools/GovDataTools.h"
+#include "mcp/tools/LiveTradingTools.h"
 #include "mcp/tools/MAAnalyticsTools.h"
 #include "mcp/tools/MarketsTools.h"
 #include "mcp/tools/McpServersTools.h"
@@ -116,6 +117,9 @@ void initialize_all_tools() {
     // paper trading tab
     provider.register_tools(tools::get_paper_trading_tools());
 
+    // live broker trading (order placement/cancel, account state, market data)
+    provider.register_tools(tools::get_live_trading_tools());
+
     // sec edgar (CIK resolution, XBRL financials, filing search)
     provider.register_tools(tools::get_edgar_tools());
 
@@ -163,7 +167,7 @@ void initialize_all_tools() {
     // gov-data — 10 government providers (US Treasury/Congress, France, HK, UK, Australia, ...)
     provider.register_tools(tools::get_gov_data_tools());
 
-    // equity-research — symbol search, load, financials, technicals, peers, news, talipp, sentiment
+    // equity-research — symbol search, load, financials, technicals, peers, news, sentiment
     provider.register_tools(tools::get_equity_research_tools());
 
     // workspace — monitors, windows, panels, layouts, snapshots, symbol groups, actions, command-bar
@@ -181,7 +185,7 @@ void initialize_all_tools() {
     // surface-analytics — 35-surface capability catalog + Databento fetches
     provider.register_tools(tools::get_surface_analytics_tools());
 
-    // Phase 6: meta tools — tool.list, tool.describe, mcp.health.
+    // Phase 6: meta tools — tool_list, tool_describe, mcp_health.
     // Always exposed so the LLM can lazy-discover specialised tools.
     provider.register_tools(tools::get_meta_tools());
 

@@ -67,6 +67,7 @@ class ExchangeService : public QObject {
     /// back to an already-warm exchange.
     bool is_ws_active() const;
     void set_ws_primary_symbol(const QString& symbol);
+    void set_ws_timeframe(const QString& timeframe);
     QString get_ws_primary_symbol() const;
 
     // One-shot data fetches — delegated to current session (synchronous; worker thread only).
@@ -83,7 +84,8 @@ class ExchangeService : public QObject {
     // Authenticated operations — current session, worker thread only.
     QJsonObject fetch_balance();
     QJsonObject place_exchange_order(const QString& symbol, const QString& side, const QString& type, double amount,
-                                     double price = 0.0);
+                                     double price = 0.0, double stop_price = 0.0, double sl = 0.0, double tp = 0.0,
+                                     bool reduce_only = false);
     QJsonObject cancel_exchange_order(const QString& order_id, const QString& symbol);
     QJsonObject fetch_positions_live(const QString& symbol = "");
     QJsonObject fetch_open_orders_live(const QString& symbol = "");

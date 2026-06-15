@@ -3,6 +3,7 @@
 #include "core/logging/Logger.h"
 #include "datahub/DataHub.h"
 #include "datahub/DataHubMetaTypes.h"
+#include "services/options/OptionChainService.h"
 #include "ui/theme/Theme.h"
 
 #include <QColor>
@@ -114,12 +115,13 @@ QVariant ScreenedChainModel::data(const QModelIndex& index, int role) const {
 QVariant ScreenedChainModel::headerData(int section, Qt::Orientation orient, int role) const {
     if (orient != Qt::Horizontal || role != Qt::DisplayRole)
         return {};
-    static const char* kHeaders[ColCount] = {
-        "Strike", "CE IV", "CE OI", "CE Δ%", "PE Δ%", "PE OI", "PE IV",
+    // tr() per-call — owning QHeaderView re-polls on QEvent::LanguageChange.
+    const QString headers[ColCount] = {
+        tr("Strike"), tr("CE IV"), tr("CE OI"), tr("CE Δ%"), tr("PE Δ%"), tr("PE OI"), tr("PE IV"),
     };
     if (section < 0 || section >= ColCount)
         return {};
-    return QString::fromLatin1(kHeaders[section]);
+    return headers[section];
 }
 
 void ScreenedChainModel::set_rows(const QVector<OptionChainRow>& rows) {
@@ -176,11 +178,12 @@ void ScreenerSubTab::setup_ui() {
     hlay->setContentsMargins(12, 8, 12, 8);
     hlay->setSpacing(8);
 
-    auto add_kv = [&](const QString& label, QWidget* control) {
+    auto add_kv = [&](const QString& label, QLabel*& label_out, QWidget* control) {
         auto* l = new QLabel(label.toUpper(), header);
         l->setObjectName("fnoScreenerLabel");
         hlay->addWidget(l);
         hlay->addWidget(control);
+        label_out = l;
     };
 
     iv_min_ = new QDoubleSpinBox(header);
@@ -193,27 +196,27 @@ void ScreenerSubTab::setup_ui() {
     iv_max_->setSuffix("%");
     iv_max_->setSingleStep(1.0);
     iv_max_->setValue(200);
-    add_kv("IV Min", iv_min_);
-    add_kv("IV Max", iv_max_);
+    add_kv(tr("IV Min"), iv_min_label_, iv_min_);
+    add_kv(tr("IV Max"), iv_max_label_, iv_max_);
 
     distance_ = new QSpinBox(header);
     distance_->setRange(1, 100);
     distance_->setValue(20);
-    add_kv("± Strikes", distance_);
+    add_kv(tr("± Strikes"), distance_label_, distance_);
 
     ce_oi_min_ = new QSpinBox(header);
     ce_oi_min_->setRange(0, 1000);
     ce_oi_min_->setSuffix(" L");
     ce_oi_min_->setSingleStep(1);
     ce_oi_min_->setValue(0);
-    add_kv("CE OI ≥", ce_oi_min_);
+    add_kv(tr("CE OI ≥"), ce_oi_label_, ce_oi_min_);
 
     pe_oi_min_ = new QSpinBox(header);
     pe_oi_min_->setRange(0, 1000);
     pe_oi_min_->setSuffix(" L");
     pe_oi_min_->setSingleStep(1);
     pe_oi_min_->setValue(0);
-    add_kv("PE OI ≥", pe_oi_min_);
+    add_kv(tr("PE OI ≥"), pe_oi_label_, pe_oi_min_);
 
     hlay->addStretch(1);
     root->addWidget(header);
@@ -235,9 +238,20 @@ void ScreenerSubTab::setup_ui() {
     root->addWidget(table_, 1);
 
     // ── Footer: count label ───────────────────────────────────────────────
-    count_label_ = new QLabel(QStringLiteral("0 of 0 strikes match"), this);
+    count_label_ = new QLabel(tr("0 of 0 strikes match"), this);
     count_label_->setObjectName("fnoScreenerCount");
     root->addWidget(count_label_);
+
+    connect(&fincept::services::options::OptionChainService::instance(),
+            &fincept::services::options::OptionChainService::chain_published,
+            this, [this](const fincept::services::options::OptionChain& chain) {
+                on_chain_published(QVariant::fromValue(chain));
+            });
+    subscribed_ = true;
+
+    const auto& cached = fincept::services::options::OptionChainService::instance().last_chain();
+    if (!cached.rows.isEmpty())
+        on_chain_published(QVariant::fromValue(cached));
 }
 
 QVariantMap ScreenerSubTab::save_state() const {
@@ -274,16 +288,28 @@ void ScreenerSubTab::showEvent(QShowEvent* e) {
 
 void ScreenerSubTab::hideEvent(QHideEvent* e) {
     QWidget::hideEvent(e);
-    if (!subscribed_)
-        return;
-    fincept::datahub::DataHub::instance().unsubscribe_pattern(this, QStringLiteral("option:chain:*"));
-    subscribed_ = false;
 }
 
 void ScreenerSubTab::on_chain_published(const QVariant& v) {
     if (!v.canConvert<OptionChain>())
         return;
     last_chain_ = v.value<OptionChain>();
+    apply_filters();
+}
+
+void ScreenerSubTab::changeEvent(QEvent* event) {
+    if (event->type() == QEvent::LanguageChange)
+        retranslateUi();
+    QWidget::changeEvent(event);
+}
+
+void ScreenerSubTab::retranslateUi() {
+    if (iv_min_label_)   iv_min_label_->setText(tr("IV Min").toUpper());
+    if (iv_max_label_)   iv_max_label_->setText(tr("IV Max").toUpper());
+    if (distance_label_) distance_label_->setText(tr("± Strikes").toUpper());
+    if (ce_oi_label_)    ce_oi_label_->setText(tr("CE OI ≥").toUpper());
+    if (pe_oi_label_)    pe_oi_label_->setText(tr("PE OI ≥").toUpper());
+    // Refresh the count label string in the new language.
     apply_filters();
 }
 
@@ -294,7 +320,7 @@ void ScreenerSubTab::on_filter_changed() {
 void ScreenerSubTab::apply_filters() {
     if (last_chain_.rows.isEmpty()) {
         model_->set_rows({});
-        count_label_->setText(QStringLiteral("0 of 0 strikes match"));
+        count_label_->setText(tr("0 of 0 strikes match"));
         return;
     }
     int atm = 0;
@@ -327,7 +353,7 @@ void ScreenerSubTab::apply_filters() {
         filtered.append(r);
     }
     model_->set_rows(filtered);
-    count_label_->setText(QString("%1 of %2 strikes match")
+    count_label_->setText(tr("%1 of %2 strikes match")
                               .arg(filtered.size())
                               .arg(last_chain_.rows.size()));
 }

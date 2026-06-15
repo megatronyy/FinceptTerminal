@@ -166,8 +166,11 @@ void ToolBar::retranslateUi() {
     if (live_label_)     live_label_->setText(tr(" LIVE"));
     if (plan_btn_)       plan_btn_->setToolTip(tr("View Plans & Pricing"));
     if (chat_mode_btn_) {
-        // Keep the ⬡ glyph as a visual icon; only the label after it translates.
-        chat_mode_btn_->setText(QStringLiteral("\xe2\xac\xa1 ") + tr("CHAT"));
+        // Keep the ⬡ glyph (U+2B21) as a visual icon; only the label after it
+        // translates. Must use fromUtf8 to decode the UTF-8 bytes — wrapping
+        // them in QStringLiteral widens each byte into its own UTF-16 unit and
+        // renders as mojibake ("â¬¡").
+        chat_mode_btn_->setText(QString::fromUtf8("\xe2\xac\xa1 ") + tr("CHAT"));
         chat_mode_btn_->setToolTip(tr("Switch to Chat Mode (F9)"));
     }
     if (logout_btn_) logout_btn_->setText(tr("LOGOUT"));
@@ -325,6 +328,9 @@ QMenu* ToolBar::build_file_menu() {
             });
         }
     });
+
+    m->addAction(tr("Close Window"),      this, [this]() { emit action_triggered("close_window"); });
+    m->addAction(tr("Close All Windows"), this, [this]() { emit action_triggered("close_all_windows"); });
 
     m->addSeparator();
     m->addAction(tr("New Layout"),       this, [this]() { emit action_triggered("layout_new"); });

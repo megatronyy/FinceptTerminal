@@ -1,7 +1,9 @@
 #pragma once
 // Crypto Order Entry — BUY/SELL tabs with toggle type buttons
 
+#include <QCheckBox>
 #include <QComboBox>
+#include <QEvent>
 #include <QLabel>
 #include <QLineEdit>
 #include <QPushButton>
@@ -20,12 +22,24 @@ class CryptoOrderEntry : public QWidget {
     void set_mode(bool is_paper);
     void set_symbol(const QString& symbol);
     void set_futures_mode(bool is_futures); // show/hide leverage + margin controls
+    bool reduce_only() const;               // reduce-only flag (perp/futures only)
+
+    // In-flight guard for live order submission. While an order POST is in
+    // flight the submit button is disabled and relabelled "SENDING…" so a
+    // double-click / held Ctrl+Enter can't fire a second real exchange order.
+    // Re-enabling on the main thread when the async call completes restores the
+    // normal BUY/SELL label.
+    void set_submit_busy(bool busy);
+    bool submit_busy() const { return submit_busy_; }
 
   signals:
     void order_submitted(const QString& side, const QString& order_type, double quantity, double price,
                          double stop_price, double sl_price, double tp_price);
     void leverage_changed(int leverage);
     void margin_mode_changed(const QString& mode); // "cross" or "isolated"
+
+  protected:
+    void changeEvent(QEvent* event) override;
 
   private slots:
     void on_submit();
@@ -35,6 +49,10 @@ class CryptoOrderEntry : public QWidget {
     void update_cost_preview();
     void set_buy_side(bool is_buy);
     void set_order_type(int idx);
+    void retranslateUi();
+
+    // Title
+    QLabel* title_label_ = nullptr;
 
     // Side tabs
     QPushButton* buy_tab_ = nullptr;
@@ -65,12 +83,31 @@ class CryptoOrderEntry : public QWidget {
     QLabel* avail_label_ = nullptr;
     QLabel* mode_label_ = nullptr;
 
+    // Static field/section titles (cached for retranslateUi)
+    QLabel* balance_title_ = nullptr;
+    QLabel* mark_title_ = nullptr;
+    QLabel* avail_title_ = nullptr;
+    QLabel* qty_title_ = nullptr;
+    QLabel* price_title_ = nullptr;
+    QLabel* stop_title_ = nullptr;
+    QLabel* sl_title_ = nullptr;
+    QLabel* tp_title_ = nullptr;
+    QLabel* leverage_title_ = nullptr;
+    QLabel* margin_title_ = nullptr;
+
     // Order breakdown
     QLabel* cost_label_ = nullptr;
     QLabel* fee_label_ = nullptr;
     QLabel* total_label_ = nullptr;
     QLabel* recv_label_ = nullptr;
     QLabel* pct_used_label_ = nullptr;
+
+    // Order breakdown titles (cached for retranslateUi)
+    QLabel* cost_title_ = nullptr;
+    QLabel* fee_title_ = nullptr;
+    QLabel* total_title_ = nullptr;
+    QLabel* recv_title_ = nullptr;
+    QLabel* pct_used_title_ = nullptr;
 
     // Submit subtitle (rendered as a second line under the main button label)
     QLabel* submit_subtitle_ = nullptr;
@@ -80,6 +117,7 @@ class CryptoOrderEntry : public QWidget {
     QWidget* futures_section_ = nullptr;
     QSpinBox* leverage_spin_ = nullptr;
     QComboBox* margin_mode_combo_ = nullptr;
+    QCheckBox* reduce_only_check_ = nullptr;
 
     // State
     double balance_ = 0;
@@ -87,6 +125,7 @@ class CryptoOrderEntry : public QWidget {
     bool is_paper_ = true;
     bool is_buy_side_ = true;
     bool is_futures_ = false;
+    bool submit_busy_ = false; // true while a live order POST is in flight
     QString current_symbol_ = "BTC/USDT";
 };
 

@@ -4,6 +4,7 @@
 #include "core/logging/Logger.h"
 #include "core/session/ScreenStateManager.h"
 #include "core/events/EventBus.h"
+#include "services/cloud/CloudSyncEngine.h"
 #include "screens/agent_config/AgentChatPanel.h"
 #include "screens/agent_config/AgenticTasksPanel.h"
 #include "screens/agent_config/AgentsViewPanel.h"
@@ -420,6 +421,8 @@ void AgentConfigScreen::showEvent(QShowEvent* event) {
         ensure_panel_built(services::AgentViewMode::Agents);
         services::AgentService::instance().discover_agents();
     }
+    // Rate-gated pull of cloud agent configs on screen entry (no-op when sync is off).
+    fincept::services::cloud::CloudSyncEngine::instance().request_pull(QStringLiteral("agent_config"));
 }
 
 void AgentConfigScreen::hideEvent(QHideEvent* event) {
@@ -429,7 +432,14 @@ void AgentConfigScreen::hideEvent(QHideEvent* event) {
 // ── IStatefulScreen ──────────────────────────────────────────────────────────
 
 QVariantMap AgentConfigScreen::save_state() const {
-    return {{"view", static_cast<int>(current_view_)}};
+    QVariantMap state{{"view", static_cast<int>(current_view_)}};
+    if (create_panel_)
+        state["create_draft"] = create_panel_->save_draft();
+    if (agents_panel_)
+        state["agents_draft"] = agents_panel_->save_draft();
+    if (workflows_panel_)
+        state["workflows_draft"] = workflows_panel_->save_draft();
+    return state;
 }
 
 void AgentConfigScreen::restore_state(const QVariantMap& state) {
@@ -437,6 +447,12 @@ void AgentConfigScreen::restore_state(const QVariantMap& state) {
     if (v < 0)
         return;
     set_view(static_cast<services::AgentViewMode>(v));
+    if (create_panel_ && state.contains("create_draft"))
+        create_panel_->restore_draft(state.value("create_draft").toMap());
+    if (agents_panel_ && state.contains("agents_draft"))
+        agents_panel_->restore_draft(state.value("agents_draft").toMap());
+    if (workflows_panel_ && state.contains("workflows_draft"))
+        workflows_panel_->restore_draft(state.value("workflows_draft").toMap());
 }
 
 } // namespace fincept::screens

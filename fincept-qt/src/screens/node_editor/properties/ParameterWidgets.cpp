@@ -5,13 +5,19 @@
 #include "services/agents/AgentTypes.h"
 #include "services/file_manager/FileManagerService.h"
 #include "storage/repositories/LlmProfileRepository.h"
+#include "storage/repositories/DataSourceRepository.h"
 #include "ui/theme/Theme.h"
 
+#include <QCoreApplication>
 #include <QFileDialog>
 #include <QFileInfo>
 #include <QHBoxLayout>
 #include <QJsonDocument>
 #include <QPushButton>
+#include <QPointer>
+#include <QtConcurrent/QtConcurrent>
+
+#include <memory>
 
 namespace fincept::workflow {
 
@@ -172,7 +178,7 @@ QWidget* ParameterWidgetFactory::create(const ParamDef& param, const QJsonValue&
         auto populate = [combo, allowed_exts](const QString& select_path = {}) {
             QString prev = select_path.isEmpty() ? combo->currentData().toString() : select_path;
             combo->clear();
-            combo->addItem("— select file —", QString());
+            combo->addItem(QCoreApplication::translate("ParameterWidgetFactory", "— select file —"), QString());
 
             auto& svc = fincept::services::FileManagerService::instance();
             for (const auto& v : svc.all_files()) {
@@ -196,9 +202,10 @@ QWidget* ParameterWidgetFactory::create(const ParamDef& param, const QJsonValue&
         rl->addWidget(combo, 1);
 
         // Import button — opens file dialog, imports into FileManagerService, auto-selects
-        auto* import_btn = new QPushButton("+ Import");
+        auto* import_btn = new QPushButton(QCoreApplication::translate("ParameterWidgetFactory", "+ Import"));
         import_btn->setFixedHeight(24);
-        import_btn->setToolTip("Import a file from your PC into the File Manager");
+        import_btn->setToolTip(
+            QCoreApplication::translate("ParameterWidgetFactory", "Import a file from your PC into the File Manager"));
         import_btn->setStyleSheet(QString("QPushButton { background: %1; color: %2;"
                                           " border: 1px solid %3; font-family: Consolas;"
                                           " font-size: 10px; padding: 0 6px; }"
@@ -210,8 +217,9 @@ QWidget* ParameterWidgetFactory::create(const ParamDef& param, const QJsonValue&
 
         // Hint showing allowed extensions
         if (!allowed_exts.isEmpty()) {
-            auto* hint = new QLabel("Accepted: " + allowed_exts.join(", ").toUpper() +
-                                    "  •  Or pick an already-imported file above");
+            auto* hint = new QLabel(QCoreApplication::translate("ParameterWidgetFactory",
+                                                               "Accepted: %1  •  Or pick an already-imported file above")
+                                        .arg(allowed_exts.join(", ").toUpper()));
             hint->setStyleSheet(
                 QString("color: %1; font-family: Consolas; font-size: 10px;").arg(ui::colors::TEXT_TERTIARY()));
             hint->setWordWrap(true);
@@ -223,8 +231,9 @@ QWidget* ParameterWidgetFactory::create(const ParamDef& param, const QJsonValue&
 
         QObject::connect(import_btn, &QPushButton::clicked, container,
                          [populate, dialog_filter, key, on_change, import_btn]() {
-                             QString path = QFileDialog::getOpenFileName(import_btn->window(), "Import File", QString(),
-                                                                         dialog_filter);
+                             QString path = QFileDialog::getOpenFileName(
+                                 import_btn->window(), QCoreApplication::translate("ParameterWidgetFactory", "Import File"),
+                                 QString(), dialog_filter);
                              if (path.isEmpty())
                                  return;
 
@@ -264,7 +273,7 @@ QWidget* ParameterWidgetFactory::create(const ParamDef& param, const QJsonValue&
             if (combo->count() > 0)
                 saved = combo->currentData().toString();
             combo->clear();
-            combo->addItem("— select agent —", QString());
+            combo->addItem(QCoreApplication::translate("ParameterWidgetFactory", "— select agent —"), QString());
 
             const auto agents = fincept::services::AgentService::instance().cached_agents();
             for (const auto& a : agents) {
@@ -296,7 +305,7 @@ QWidget* ParameterWidgetFactory::create(const ParamDef& param, const QJsonValue&
         if (svc.cached_agent_count() > 0) {
             populate_agents(); // cache hot — fill immediately
         } else {
-            combo->addItem("Loading agents…", QString());
+            combo->addItem(QCoreApplication::translate("ParameterWidgetFactory", "Loading agents…"), QString());
             trigger_discovery();
         }
 
@@ -304,7 +313,7 @@ QWidget* ParameterWidgetFactory::create(const ParamDef& param, const QJsonValue&
 
         auto* refresh_btn = new QPushButton("↻");
         refresh_btn->setFixedSize(24, 24);
-        refresh_btn->setToolTip("Refresh agent list");
+        refresh_btn->setToolTip(QCoreApplication::translate("ParameterWidgetFactory", "Refresh agent list"));
         refresh_btn->setStyleSheet(QString("QPushButton { background:%1; color:#7c3aed;"
                                            " border:1px solid %1; font-size:13px; }"
                                            "QPushButton:hover { background:%2; }")
@@ -329,7 +338,7 @@ QWidget* ParameterWidgetFactory::create(const ParamDef& param, const QJsonValue&
                     "  border:1px solid %2; selection-background-color:#7c3aed;"
                     "  font-family:Consolas; }")
                 .arg(input_style(), ui::colors::BORDER_MED(), ui::colors::BG_HOVER(), ui::colors::TEXT_PRIMARY()));
-        combo->addItem("— agent default —", QString());
+        combo->addItem(QCoreApplication::translate("ParameterWidgetFactory", "— agent default —"), QString());
 
         QString saved = current_value.toString();
         auto res = fincept::LlmProfileRepository::instance().list_profiles();
@@ -343,7 +352,8 @@ QWidget* ParameterWidgetFactory::create(const ParamDef& param, const QJsonValue&
         }
         layout->addWidget(combo);
 
-        auto* hint = new QLabel("Leave blank to use the LLM assigned to the agent in Agent Config");
+        auto* hint = new QLabel(QCoreApplication::translate(
+            "ParameterWidgetFactory", "Leave blank to use the LLM assigned to the agent in Agent Config"));
         hint->setStyleSheet(QString("color:%1; font-family:Consolas; font-size:10px;").arg(ui::colors::TEXT_TERTIARY()));
         hint->setWordWrap(true);
         layout->addWidget(hint);
@@ -373,7 +383,7 @@ QWidget* ParameterWidgetFactory::create(const ParamDef& param, const QJsonValue&
         auto populate_tools = [combo, current_value]() {
             QString saved = combo->count() > 0 ? combo->currentData().toString() : current_value.toString();
             combo->clear();
-            combo->addItem("— select tool —", QString());
+            combo->addItem(QCoreApplication::translate("ParameterWidgetFactory", "— select tool —"), QString());
 
             auto tools = mcp::McpService::instance().get_all_tools();
             // Group by category for readability — use server_name as group header hint
@@ -401,7 +411,7 @@ QWidget* ParameterWidgetFactory::create(const ParamDef& param, const QJsonValue&
             }
         };
 
-        combo->addItem("Loading tools…", QString());
+        combo->addItem(QCoreApplication::translate("ParameterWidgetFactory", "Loading tools…"), QString());
         // Populate async so we don't block the UI thread constructing the panel
         QMetaObject::invokeMethod(combo, [populate_tools]() { populate_tools(); }, Qt::QueuedConnection);
 
@@ -409,7 +419,7 @@ QWidget* ParameterWidgetFactory::create(const ParamDef& param, const QJsonValue&
 
         auto* refresh_btn = new QPushButton("↻");
         refresh_btn->setFixedSize(24, 24);
-        refresh_btn->setToolTip("Refresh tool list");
+        refresh_btn->setToolTip(QCoreApplication::translate("ParameterWidgetFactory", "Refresh tool list"));
         refresh_btn->setStyleSheet(QString("QPushButton { background:%1; color:#6366f1;"
                                            " border:1px solid %1; font-size:13px; }"
                                            "QPushButton:hover { background:%2; }")
@@ -417,7 +427,8 @@ QWidget* ParameterWidgetFactory::create(const ParamDef& param, const QJsonValue&
         rl->addWidget(refresh_btn);
         layout->addWidget(row);
 
-        auto* hint = new QLabel("All Fincept internal tools. Input JSON flows in as arguments.");
+        auto* hint = new QLabel(QCoreApplication::translate(
+            "ParameterWidgetFactory", "All Fincept internal tools. Input JSON flows in as arguments."));
         hint->setStyleSheet(QString("color:%1; font-family:Consolas; font-size:10px;").arg(ui::colors::TEXT_TERTIARY()));
         hint->setWordWrap(true);
         layout->addWidget(hint);
@@ -429,6 +440,74 @@ QWidget* ParameterWidgetFactory::create(const ParamDef& param, const QJsonValue&
         });
 
         QObject::connect(refresh_btn, &QPushButton::clicked, container, [populate_tools]() { populate_tools(); });
+    } else if (param.type == "datasource_connection_select") {
+        auto* row = new QWidget(parent);
+        auto* rl = new QHBoxLayout(row);
+        rl->setContentsMargins(0, 0, 0, 0);
+        rl->setSpacing(4);
+
+        auto* combo = new QComboBox;
+        combo->setObjectName("datasource_connection_select");
+        combo->setMaximumWidth(260);
+        combo->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
+
+        // Get the connector ID from param placeholder
+        QString provider = param.placeholder;
+
+        QPointer<QComboBox> p_combo(combo);
+        auto populate_connections = [p_combo, provider, current_value]() {
+            if (!p_combo) return;
+            p_combo->clear();
+            p_combo->addItem(QCoreApplication::translate("ParameterWidgetFactory", "Loading connections..."), QString());
+
+            // Load all saved connections of this provider type asynchronously
+            (void)QtConcurrent::run([p_combo, provider, current_value]() {
+                auto res = std::make_shared<Result<QVector<DataSource>>>(DataSourceRepository::instance().list_all());
+
+                // Post results back to combo box on the UI thread
+                QMetaObject::invokeMethod(p_combo.data(), [p_combo, provider, current_value, res]() {
+                    if (!p_combo) return;
+
+                    QString saved = p_combo->count() > 0 ? p_combo->currentData().toString() : current_value.toString();
+                    p_combo->clear();
+                    p_combo->addItem(QCoreApplication::translate("ParameterWidgetFactory", "— select connection —"),
+                                     QString());
+
+                    if (res->is_ok()) {
+                        for (const auto& ds : res->value()) {
+                            if (ds.provider == provider && ds.enabled) {
+                                QString display = ds.display_name + "  [" + ds.alias + "]";
+                                p_combo->addItem(display, ds.id);
+                                if (ds.id == saved) {
+                                    p_combo->setCurrentIndex(p_combo->count() - 1);
+                                }
+                            }
+                        }
+                    }
+                }, Qt::QueuedConnection);
+            });
+        };
+
+        // Initial populate
+        populate_connections();
+
+        rl->addWidget(combo, 1);
+
+        auto* refresh_btn = new QPushButton("↻");
+        refresh_btn->setObjectName("datasource_connection_refresh");
+        refresh_btn->setFixedSize(24, 24);
+        refresh_btn->setToolTip(QCoreApplication::translate("ParameterWidgetFactory", "Refresh connection list"));
+        rl->addWidget(refresh_btn);
+
+        layout->addWidget(row);
+
+        QObject::connect(combo, &QComboBox::currentIndexChanged, container, [key, on_change, combo](int) {
+            on_change(key, QJsonValue(combo->currentData().toString()));
+        });
+
+        QObject::connect(refresh_btn, &QPushButton::clicked, container, [populate_connections]() {
+            populate_connections();
+        });
     }
 
     return container;

@@ -8,8 +8,11 @@
 #include "screens/ai_quant_lab/QuantModulePanel_GsHelpers.h"
 #include "screens/ai_quant_lab/QuantModulePanel_Styles.h"
 
+#include "core/currency/Currency.h"
+#include "core/events/EventBus.h"
 #include "core/logging/Logger.h"
 #include "services/ai_quant_lab/AIQuantLabService.h"
+#include "services/backtesting/BacktestingService.h"
 #include "services/file_manager/FileManagerService.h"
 #include "ui/theme/Theme.h"
 
@@ -131,6 +134,27 @@ QWidget* QuantModulePanel::build_backtesting_panel() {
     });
     vl->addWidget(run);
 
+    auto* open_terminal = make_run_button(tr("OPEN IN BACKTESTING TERMINAL"), w);
+    open_terminal->setStyleSheet(
+        QString("QPushButton { background:transparent; color:%1; border:1px solid %2;"
+                "padding:8px 16px; font-size:11px; font-weight:700; }"
+                "QPushButton:hover { background:%1; color:%3; }")
+            .arg(ui::colors::AMBER(), ui::colors::AMBER_DIM(), ui::colors::BG_BASE()));
+    connect(open_terminal, &QPushButton::clicked, this, [this]() {
+        auto* instruments_edit = text_inputs_.value("bt_instruments");
+        if (!instruments_edit || instruments_edit->text().trimmed().isEmpty()) return;
+        QJsonArray symbols;
+        for (const auto& s : instruments_edit->text().split(',', Qt::SkipEmptyParts))
+            symbols.append(s.trimmed());
+        QJsonObject config;
+        config["symbols"] = symbols;
+        auto* capital_spin = double_inputs_.value("bt_capital");
+        if (capital_spin) config["initialCapital"] = capital_spin->value();
+        fincept::services::backtest::BacktestingService::instance().set_pending_portfolio_config(config);
+        fincept::EventBus::instance().publish("nav.switch_screen", {{"screen_id", QString("backtesting")}});
+    });
+    vl->addWidget(open_terminal);
+
     auto* rc = new QWidget(w);
     results_layout_ = new QVBoxLayout(rc);
     results_layout_->setContentsMargins(0, 8, 0, 0);
@@ -239,10 +263,7 @@ void QuantModulePanel::display_backtest_result(const QJsonObject& payload) {
     int    t_days     = metrics["trading_days"].toInt();
 
     auto fmt_pct = [](double v) { return QString("%1%2%").arg(v >= 0 ? "+" : "").arg(v, 0, 'f', 2); };
-    auto fmt_usd = [](double v) -> QString {
-        if (v >= 1e6) return QString("$%1M").arg(v / 1e6, 0, 'f', 2);
-        return QString("$%1K").arg(v / 1e3, 0, 'f', 0);
-    };
+    auto fmt_usd = [](double v) -> QString { return cur::money(v, /*compact=*/true); };
 
     QList<KpiCard> kpis = {
         {tr("TOTAL RETURN"),   fmt_pct(total_ret),  tr("%1 final").arg(fmt_usd(final_val)),  total_ret >= 0, false},
@@ -365,7 +386,7 @@ void QuantModulePanel::display_backtest_result(const QJsonObject& payload) {
         auto* y_axis = new QValueAxis;
         double padding = (max_val - min_val) * 0.05;
         y_axis->setRange(min_val - padding, max_val + padding);
-        y_axis->setLabelFormat("$%.0f");
+        y_axis->setLabelFormat(cur::symbol() + "%.0f");
         y_axis->setLabelsColor(QColor(QString(text_t)));
         y_axis->setGridLineColor(QColor(QString(border_dim)));
         y_axis->setLinePen(QPen(QColor(QString(border_med))));

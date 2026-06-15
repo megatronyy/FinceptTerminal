@@ -50,8 +50,9 @@ static Result<void> v023_add_column_if_missing(QSqlDatabase& db, const QString& 
 
 Result<void> apply_v023(QSqlDatabase& db) {
     // ── Strategy registry (DSL strategies) ──────────────────────────────────
-    // QC strategies live in scripts/strategies/_registry.py — not in SQL.
-    // This table only holds DSL strategies built in StrategyBuilderPanel.
+    // Holds all strategies: the seeded curated library (LIB-*) plus user
+    // strategies built in StrategyBuilderPanel. (The old Python/LEAN QC library
+    // was removed.)
     {
         auto r = v023_sql(db, R"sql(
             CREATE TABLE IF NOT EXISTS algo_strategies (
@@ -125,6 +126,7 @@ Result<void> apply_v023(QSqlDatabase& db) {
         {"algo_deployments", "paper_portfolio_id", "TEXT DEFAULT ''"},
         {"algo_deployments", "max_order_value",    "REAL DEFAULT 0"},
         {"algo_deployments", "max_daily_loss",     "REAL DEFAULT 0"},
+        {"algo_deployments", "entry_side",         "TEXT DEFAULT 'BUY'"},
         {"algo_deployments", "pid",                "INTEGER DEFAULT 0"},
     };
     for (const auto& c : deployment_cols) {
@@ -204,6 +206,18 @@ Result<void> apply_v023(QSqlDatabase& db) {
                 updated_at TEXT DEFAULT CURRENT_TIMESTAMP
             )
         )sql");
+        if (r.is_err())
+            return r;
+    }
+
+    // Add current_price and entry_side to algo_metrics for live dashboard display.
+    {
+        auto r = v023_add_column_if_missing(db, "algo_metrics", "current_price", "REAL DEFAULT 0");
+        if (r.is_err())
+            return r;
+    }
+    {
+        auto r = v023_add_column_if_missing(db, "algo_metrics", "entry_side", "TEXT DEFAULT 'BUY'");
         if (r.is_err())
             return r;
     }

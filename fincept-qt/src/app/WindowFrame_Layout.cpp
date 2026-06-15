@@ -40,7 +40,13 @@ layout::FrameLayout WindowFrame::capture_layout() const {
     if (!dock_manager_ || !dock_router_)
         return fl;
 
-    // ADS dock state — opaque blob covering splits, tab order, sizes.
+    // ADS dock state — opaque blob covering splits, tab order, sizes. Prune
+    // closed panels first so workspace snapshots capture only the visible grid
+    // and don't carry phantom areas that reshuffle the layout on restore. The
+    // session-layout timer keeps the live tree pruned continuously, so this is
+    // normally a no-op; it just guarantees a clean blob if a snapshot lands in
+    // the sub-500ms window after a layout change.
+    dock_router_->prune_hidden_panels();
     fl.dock_state = dock_manager_->saveState();
 
     // Active panel — whichever dock widget currently has focus.
@@ -139,6 +145,12 @@ bool WindowFrame::apply_layout(const layout::FrameLayout& fl) {
     // dock_widgets_), groups everything as hidden tabs in one CenterDockArea
     // (vs. prepare_dock_widget's one-area-per-call), and is also what the
     // constructor calls on the QSettings-restore path — same protection here.
+    // Suppress the debounced layout save during the bulk pre-create +
+    // restoreState pass. These operations fire dockWidgetAdded and
+    // viewToggled dozens of times; saving mid-restore would persist an
+    // incomplete intermediate state.
+    suppress_layout_save_ = true;
+
     dock_router_->ensure_all_registered();
 
     // Track each panel's resolved string id alongside its FrameLayout
@@ -178,8 +190,12 @@ bool WindowFrame::apply_layout(const layout::FrameLayout& fl) {
         ok = dock_manager_->restoreState(fl.dock_state);
         if (!ok) {
             LOG_WARN("WindowFrame", "apply_layout: CDockManager::restoreState rejected dock blob");
+            suppress_layout_save_ = false;
+            return false;
         }
     }
+
+    suppress_layout_save_ = false;
 
     // Phase 3: chrome flags.
     if (focus_mode_ != fl.focus_mode)

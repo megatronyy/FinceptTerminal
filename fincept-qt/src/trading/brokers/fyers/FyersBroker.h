@@ -15,6 +15,8 @@ class FyersBroker : public IBroker {
     const char* base_url() const override { return "https://api-t1.fyers.in"; }
     const char* ws_adapter_name() const override { return "fyers"; }
 
+    static QString fyers_login_url(const QString& client_id, const QString& redirect_uri);
+
     BrokerProfile profile() const override {
         return BrokerProfile{
             .id = "fyers",
@@ -41,8 +43,18 @@ class FyersBroker : public IBroker {
             .supports_cover_order = true,
             .has_native_paper = false,
             .default_paper_balance = 1000000.0,
-            .default_watchlist = {"HDFCBANK", "ICICIBANK", "SBIN", "KOTAKBANK", "AXISBANK", "TCS", "INFY", "RELIANCE",
-                                  "TATAMOTORS", "BAJFINANCE"},
+            // Nifty 50 constituents (NSE large-caps). Plain symbols; the stream's
+            // to_fyers() helper maps each to "NSE:<sym>-EQ" when subscribing.
+            .default_watchlist = {"ADANIENT",   "ADANIPORTS", "APOLLOHOSP", "ASIANPAINT", "AXISBANK",
+                                  "BAJAJ-AUTO", "BAJAJFINSV", "BAJFINANCE", "BEL",        "BHARTIARTL",
+                                  "CIPLA",      "COALINDIA",  "DIVISLAB",   "DRREDDY",    "EICHERMOT",
+                                  "GRASIM",     "HCLTECH",    "HDFCBANK",   "HDFCLIFE",   "HEROMOTOCO",
+                                  "HINDALCO",   "HINDUNILVR", "ICICIBANK",  "INDUSINDBK", "INFY",
+                                  "ITC",        "JIOFIN",     "JSWSTEEL",   "KOTAKBANK",  "LT",
+                                  "M&M",        "MARUTI",     "NESTLEIND",  "NTPC",       "ONGC",
+                                  "POWERGRID",  "RELIANCE",   "SBILIFE",    "SBIN",       "SHRIRAMFIN",
+                                  "SUNPHARMA",  "TATACONSUM", "TATASTEEL",  "TCS",
+                                  "TECHM",      "TITAN",      "TRENT",      "ULTRACEMCO", "WIPRO"},
             .default_symbol = "RELIANCE",
             .default_exchange = "NSE",
             .brokerage_info = "\u20B920/order or 0.03% (whichever lower)",
@@ -51,6 +63,12 @@ class FyersBroker : public IBroker {
 
     TokenExchangeResponse exchange_token(const QString& api_key, const QString& api_secret,
                                          const QString& auth_code) override;
+
+    // Fyers issues a refresh token valid for 15 days. Silent refresh additionally
+    // requires the user's trading PIN, stored in additional_data["pin"].
+    bool supports_silent_refresh() const override { return true; }
+    TokenExchangeResponse refresh_session(const BrokerCredentials& creds) override;
+
     OrderPlaceResponse place_order(const BrokerCredentials& creds, const UnifiedOrder& order) override;
     ApiResponse<QJsonObject> modify_order(const BrokerCredentials& creds, const QString& order_id,
                                           const QJsonObject& modifications) override;
@@ -66,8 +84,25 @@ class FyersBroker : public IBroker {
                                                    const QString& resolution, const QString& from_date,
                                                    const QString& to_date) override;
 
+    // --- Multi-quote & Market Depth ---
+    ApiResponse<QVector<BrokerQuote>> get_multi_quotes(
+        const BrokerCredentials& creds,
+        const QVector<QPair<QString, QString>>& symbols) override;
+
+    ApiResponse<MarketDepth> get_market_depth(
+        const BrokerCredentials& creds,
+        const QString& symbol, const QString& exchange) override;
+
+    // Market depth — GET /data/depth (5-level bid/ask)
+    ApiResponse<QVector<BrokerQuote>> get_historical_quotes_single(const BrokerCredentials& creds,
+                                                                    const QString& symbol, const QString& start,
+                                                                    const QString& end, int limit = 1000) override;
+
     // Market clock — GET /api/v3/marketStatus.
     ApiResponse<MarketClock> get_clock(const BrokerCredentials& creds) override;
+
+    // --- Margin Calculator --- POST /api/v3/multiorder/margin (native; total only, no SPAN breakdown)
+    ApiResponse<OrderMargin> get_order_margins(const BrokerCredentials& creds, const UnifiedOrder& order) override;
 
     // GTT — /api/v3/gtt/orders[/sync].
     GttPlaceResponse gtt_place(const BrokerCredentials& creds, const GttOrder& order) override;

@@ -3,6 +3,7 @@
 #include "screens/polymarket/ExchangePresentation.h"
 
 #include <QComboBox>
+#include <QEvent>
 #include <QLabel>
 #include <QLineEdit>
 #include <QPushButton>
@@ -34,6 +35,7 @@ class PolymarketCommandBar : public QWidget {
     void set_ws_status(bool connected);
     void set_market_count(int count);
     void set_search_text(const QString& text) { if (search_input_) search_input_->setText(text); }
+    QString search_text() const { return search_input_ ? search_input_->text() : QString(); }
 
     /// Populate the exchange dropdown. `ids` are adapter ids from
     /// PredictionExchangeRegistry (e.g. ["polymarket", "kalshi"]); `labels`
@@ -43,7 +45,7 @@ class PolymarketCommandBar : public QWidget {
 
     /// Update the account chip shown next to the exchange combo.
     /// `connected == false` renders "⚪ No account" (clickable CTA);
-    /// `connected == true` renders "🟢 <label>" in green.
+    /// `connected == true` renders "<label>" in green.
     void set_account_status(bool connected, const QString& label);
 
   signals:
@@ -55,11 +57,15 @@ class PolymarketCommandBar : public QWidget {
     void exchange_changed(const QString& exchange_id);
     void account_clicked();
 
+  protected:
+    void changeEvent(QEvent* event) override;
+
   private:
     void build_ui();
     void rebuild_view_pills();
     void apply_accent();
     void rebuild_categories();  // called when presentation or tag set changes
+    void retranslateUi();
 
     QComboBox* exchange_combo_ = nullptr;
     QPushButton* account_chip_ = nullptr;
@@ -79,6 +85,9 @@ class PolymarketCommandBar : public QWidget {
 
     ExchangePresentation presentation_ = ExchangePresentation::for_polymarket();
     QStringList current_tags_;
+    bool ws_connected_ = false;
+    bool account_connected_ = false;
+    QString account_label_;
 };
 
 } // namespace fincept::screens::polymarket

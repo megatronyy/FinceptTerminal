@@ -37,7 +37,7 @@ void BacktestingScreen::on_provider_changed(int index) {
     // Clear stale strategies and show loading state
     strategies_.clear();
     strategy_category_combo_->clear();
-    strategy_category_combo_->addItem("Loading...");
+    strategy_category_combo_->addItem(tr("Loading..."));
     strategy_combo_->clear();
 
     const auto& slug = providers_[index].slug;
@@ -146,6 +146,34 @@ void BacktestingScreen::update_command_buttons() {
 // ── Gather args ──────────────────────────────────────────────────────────────
 
 QJsonObject BacktestingScreen::gather_strategy_params() {
+    // Custom combo: build comboConfig JSON instead of flat params
+    auto strategy_id = strategy_combo_->currentData().toString();
+    if (strategy_id == "custom_combo" && combo_rows_[0].type && combo_rows_[1].type) {
+        QJsonObject params;
+        QJsonArray indicators;
+
+        int n_indicators = (combo_ind3_enabled_ && combo_ind3_enabled_->isChecked()) ? 3 : 2;
+        for (int i = 0; i < n_indicators; ++i) {
+            const auto& r = combo_rows_[i];
+            if (!r.type) continue;
+            QJsonObject ind;
+            ind["type"] = r.type->currentText();
+            ind["period"] = r.period ? r.period->value() : 14;
+            ind["condition"] = r.cond->currentText();
+            ind["threshold"] = r.val->value();
+            const QString cond = r.cond->currentText();
+            ind["exitCondition"] = (cond == "below" || cond == "cross_up") ? QString("above") : QString("below");
+            ind["exitThreshold"] = (r.type->currentText() == "rsi") ? 70.0 : r.val->value();
+            indicators.append(ind);
+        }
+
+        QJsonObject combo_config;
+        combo_config["indicators"] = indicators;
+        combo_config["logic"] = combo_logic_ ? combo_logic_->currentText() : QString("and");
+        params["comboConfig"] = combo_config;
+        return params;
+    }
+
     QJsonObject params;
     for (auto* spin : param_spinboxes_) {
         auto name = spin->property("param_name").toString();
@@ -172,6 +200,10 @@ QJsonObject BacktestingScreen::gather_args() {
     args["symbols"] = symbols;
     args["startDate"] = start;
     args["endDate"] = end;
+    if (interval_combo_)
+        args["interval"] = interval_combo_->currentText();
+    if (!pending_weights_.isEmpty() && pending_weights_.size() == symbols.size())
+        args["weights"] = pending_weights_;
 
     // ── Command-specific args ──
     if (cmd_id == "backtest" || cmd_id == "optimize" || cmd_id == "walk_forward") {
@@ -180,8 +212,12 @@ QJsonObject BacktestingScreen::gather_args() {
         args["slippage"] = slippage_spin_->value() / 100.0;
         args["leverage"] = leverage_spin_->value();
         args["positionSizing"] = pos_sizing_combo_->currentText();
+        if (pos_sizing_value_spin_)
+            args["positionSizeValue"] = pos_sizing_value_spin_->value();
         args["allowShort"] = allow_short_check_->isChecked();
         args["benchmarkSymbol"] = benchmark_edit_->text().trimmed();
+        if (risk_free_spin_)
+            args["riskFreeRate"] = risk_free_spin_->value() / 100.0;
 
         if (stop_loss_spin_->value() > 0)
             args["stopLoss"] = stop_loss_spin_->value() / 100.0;
@@ -328,9 +364,10 @@ QJsonObject BacktestingScreen::gather_args() {
     if (cmd_id == "returns") {
         const QString at = returns_type_combo_->currentText();
         args["analysisType"] = at;
-        // Benchmark is consumed by returns_stats for alpha/beta/info-ratio.
         if (!benchmark_edit_->text().trimmed().isEmpty())
             args["benchmarkSymbol"] = benchmark_edit_->text().trimmed();
+        if (risk_free_spin_)
+            args["riskFreeRate"] = risk_free_spin_->value() / 100.0;
 
         QJsonObject params;
         if (at == "rolling") {
@@ -427,19 +464,19 @@ void BacktestingScreen::on_run() {
     // Validate command is supported by current provider
     if (!provider_info.commands.contains(command_id)) {
         display_error(
-            QString("Command '%1' is not supported by provider '%2'").arg(command_id, provider_info.display_name));
+            tr("Command '%1' is not supported by provider '%2'").arg(command_id, provider_info.display_name));
         return;
     }
 
     // Validate symbols not empty
     if (symbols_edit_->text().trimmed().isEmpty()) {
-        display_error("Please enter at least one symbol (e.g. SPY, AAPL)");
+        display_error(tr("Please enter at least one symbol (e.g. SPY, AAPL)"));
         return;
     }
 
     is_running_ = true;
     run_button_->setEnabled(false);
-    set_status_state("EXECUTING...", ui::colors::WARNING, "rgba(217,119,6,0.08)");
+    set_status_state(tr("EXECUTING..."), ui::colors::WARNING, "rgba(217,119,6,0.08)");
 
     auto args = gather_args();
 

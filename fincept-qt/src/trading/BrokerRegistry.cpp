@@ -1,4 +1,4 @@
-// Broker Registry — factory + lookup for all 16 broker implementations
+// Broker Registry — factory + lookup for all 22 broker implementations
 
 #include "trading/BrokerRegistry.h"
 
@@ -13,11 +13,17 @@
 #include "trading/brokers/fyers/FyersBroker.h"
 #include "trading/brokers/groww/GrowwBroker.h"
 #include "trading/brokers/ibkr/IBKRBroker.h"
+#include "trading/brokers/icicidirect/IciciDirectBroker.h"
+#include "trading/brokers/metaapi/MetaApiBroker.h"
 #include "trading/brokers/iifl/IIFLBroker.h"
 #include "trading/brokers/kotak/KotakBroker.h"
 #include "trading/brokers/motilal/MotilalBroker.h"
+#include "trading/brokers/paytm/PaytmBroker.h"
+#include "trading/brokers/samco/SamcoBroker.h"
 #include "trading/brokers/saxo/SaxoBankBroker.h"
 #include "trading/brokers/shoonya/ShoonyaBroker.h"
+#include "trading/brokers/flattrade/FlattradeBroker.h"
+#include "trading/brokers/tradejini/TradejiniBroker.h"
 #include "trading/brokers/tradier/TradierBroker.h"
 #include "trading/brokers/upstox/UpstoxBroker.h"
 #include "trading/brokers/zerodha/ZerodhaBroker.h"
@@ -121,6 +127,11 @@ void BrokerRegistry::register_all() {
     brokers_["iifl"] = std::make_unique<IIFLBroker>();
     brokers_["motilal"] = std::make_unique<MotilalBroker>();
     brokers_["shoonya"] = std::make_unique<ShoonyaBroker>();
+    brokers_["samco"] = std::make_unique<SamcoBroker>();
+    brokers_["flattrade"] = std::make_unique<FlattradeBroker>();
+    brokers_["paytm"] = std::make_unique<PaytmBroker>();
+    brokers_["tradejini"] = std::make_unique<TradejiniBroker>();
+    brokers_["icicidirect"] = std::make_unique<IciciDirectBroker>();
 
     // US brokers
     brokers_["alpaca"] = std::make_unique<AlpacaBroker>();
@@ -129,6 +140,9 @@ void BrokerRegistry::register_all() {
 
     // EU brokers
     brokers_["saxobank"] = std::make_unique<SaxoBankBroker>();
+
+    // MetaAPI-bridged
+    brokers_["metatrader4"] = std::make_unique<MetaApiBroker>();
 
     LOG_INFO("BrokerRegistry", QString("Registered %1 brokers").arg(brokers_.size()));
 }

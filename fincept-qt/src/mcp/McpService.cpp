@@ -217,21 +217,21 @@ QJsonArray McpService::format_tools_for_openai() {
 //
 // Rationale: when Tool RAG is active we send only this 6-tool prefix to the
 // LLM each turn (~3 KB of schema vs ~25 KB previously). Everything else is
-// discoverable via tool.list. Anthropic's recommended band is 3-5 always-on
+// discoverable via tool_list. Anthropic's recommended band is 3-5 always-on
 // tools — we go to 6 to keep navigation working without a search round-trip.
 //
 // Picked because they're (1) high-frequency, (2) safe (no destructive ops),
 // (3) needed before a search would even make sense:
-//   tool.list           — entry point to discover everything else
-//   tool.describe       — fetch full schema for a discovered tool
+//   tool_list           — entry point to discover everything else
+//   tool_describe       — fetch full schema for a discovered tool
 //   navigate_to_tab     — UI navigation is the LLM's primary side-effect
 //   list_tabs           — what tabs exist?
 //   get_current_tab     — where is the user?
 //   get_auth_status     — guest vs signed-in changes valid actions
 static const QSet<QString>& tier_0_tool_names() {
     static const QSet<QString> kTier0 = {
-        "tool.list",
-        "tool.describe",
+        "tool_list",
+        "tool_describe",
         "navigate_to_tab",
         "list_tabs",
         "get_current_tab",
@@ -249,7 +249,7 @@ static const QSet<QString>& tier_0_tool_names() {
 //
 // Default = TRUE.
 //
-// Rationale: Tool RAG (BM25 retrieval over the catalog via tool.list) lifts
+// Rationale: Tool RAG (BM25 retrieval over the catalog via tool_list) lifts
 // tool-pick accuracy from ~49 → ~74% on Opus 4-class models per Anthropic's
 // published numbers, and from ~80 → ~88% on 4.5-class. Sending only ~6
 // Tier-0 tools per turn (vs. previously ~50) reduces prompt tokens by ~85%.
@@ -262,6 +262,11 @@ static bool tool_rag_enabled() {
 }
 
 QJsonArray McpService::format_tools_for_openai(const ToolFilter& filter) {
+    return format_tools_for_openai(filter, QSet<QString>{});
+}
+
+QJsonArray McpService::format_tools_for_openai(const ToolFilter& filter,
+                                               const QSet<QString>& extra_tool_names) {
     QMutexLocker lock(&mutex_);
     cached_tools_locked();
 
@@ -277,9 +282,21 @@ QJsonArray McpService::format_tools_for_openai(const ToolFilter& filter) {
                                 filter.max_tools == 0;
     const bool use_rag = default_filter && tool_rag_enabled();
 
-    const QByteArray key = use_rag
-        ? QByteArrayLiteral("__tier0__")
-        : filter_signature(filter);
+    QByteArray key;
+    if (use_rag) {
+        key = QByteArrayLiteral("__tier0__");
+        // Activated tools widen the Tier-0 set, so they must vary the cache key
+        // — otherwise round 2 would be served round 1's cached 7-tool array and
+        // the model would never see the tool it just discovered.
+        if (!extra_tool_names.isEmpty()) {
+            QStringList sorted(extra_tool_names.constBegin(), extra_tool_names.constEnd());
+            sorted.sort();
+            key += '|';
+            key += sorted.join(QLatin1Char(',')).toUtf8();
+        }
+    } else {
+        key = filter_signature(filter);
+    }
 
     auto cached = openai_format_cache_.constFind(key);
     if (cached != openai_format_cache_.constEnd()) {
@@ -294,7 +311,7 @@ QJsonArray McpService::format_tools_for_openai(const ToolFilter& filter) {
     if (use_rag) {
         const auto& tier0 = tier_0_tool_names();
         for (const auto& t : cached_tools_) {
-            if (tier0.contains(t.name))
+            if (tier0.contains(t.name) || extra_tool_names.contains(t.name))
                 tools.push_back(t);
         }
     } else {
@@ -304,7 +321,7 @@ QJsonArray McpService::format_tools_for_openai(const ToolFilter& filter) {
     QJsonArray result;
     for (const auto& tool : tools) {
         // Encode tool name for the wire so dotted internal names like
-        // `tool.list` become `tool-dot-list` — Kimi / OpenAI / Groq reject
+        // `tool.list` becomes `tool-dot-list` — Kimi / OpenAI / Groq reject
         // dots in function names. parse_openai_function_name reverses this
         // when the model invokes the tool.
         QString fn_name = tool.server_id + "__" + McpProvider::encode_tool_name_for_wire(tool.name);
@@ -330,8 +347,8 @@ QJsonArray McpService::format_tools_for_openai(const ToolFilter& filter) {
 
     if (use_rag) {
         LOG_INFO(TAG, QString("format_tools_for_openai: %1/%2 tools sent to LLM "
-                              "(tier-0 / Tool RAG mode, fresh)")
-                          .arg(result.size()).arg(total_seen));
+                              "(tier-0 + %3 activated / Tool RAG mode, fresh)")
+                          .arg(result.size()).arg(total_seen).arg(extra_tool_names.size()));
     } else if (total_seen != result.size()) {
         LOG_INFO(TAG, QString("format_tools_for_openai: %1/%2 tools sent to LLM (filtered, fresh)")
                           .arg(result.size()).arg(total_seen));

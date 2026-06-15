@@ -109,7 +109,25 @@ static bool route_yfinance_to_daemon(const QStringList& args,
             }
             PythonResult r;
             r.success = true;
-            r.output = QString::fromUtf8(QJsonDocument(result).toJson(QJsonDocument::Compact));
+            // PythonWorker wraps non-object results (e.g. the bare JSON array
+            // that historical_period/historical/batch_sparklines return) under
+            // "_value" so its object-callback API always hands back an object.
+            // The string-output path callers (e.g. EquityResearchService) expect
+            // the same raw JSON the subprocess path prints — a bare array, not a
+            // {"_value":[...]} wrapper. Unwrap so both paths are byte-identical.
+            if (result.size() == 1 && result.contains(QLatin1String("_value"))) {
+                const QJsonValue v = result.value(QLatin1String("_value"));
+                QJsonDocument doc;
+                if (v.isArray())
+                    doc.setArray(v.toArray());
+                else if (v.isObject())
+                    doc.setObject(v.toObject());
+                else
+                    doc = QJsonDocument::fromVariant(v.toVariant());
+                r.output = QString::fromUtf8(doc.toJson(QJsonDocument::Compact));
+            } else {
+                r.output = QString::fromUtf8(QJsonDocument(result).toJson(QJsonDocument::Compact));
+            }
             r.exit_code = 0;
             cb(r);
         });
@@ -337,6 +355,9 @@ void PythonRunner::find_python_async() {
                     LOG_WARN("Python", "No Python interpreter found");
                 }
                 python_init_done_ = true;
+                if (!python_path_.isEmpty()) {
+                    emit python_ready();
+                }
 
                 // Drain any requests that were queued while we were detecting
                 start_next();
@@ -467,9 +488,16 @@ void PythonRunner::run_code(const QString& code, Callback cb) {
         return;
     }
 
-    // Write code to a temp file
+    // Write code to a temp file. The filename must be unique even when several
+    // run_code() calls fire within the same millisecond (e.g. on portfolio load
+    // fetch_correlation + benchmark history + risk-free rate all kick off at
+    // once). A bare millisecond timestamp collided, so one cell's completion
+    // would delete the temp file out from under another still-pending cell
+    // ("can't open file … No such file or directory"). A UUID guarantees
+    // uniqueness regardless of timing.
     QString temp_dir = QStandardPaths::writableLocation(QStandardPaths::TempLocation);
-    QString temp_path = temp_dir + "/fincept_cell_" + QString::number(QDateTime::currentMSecsSinceEpoch()) + ".py";
+    QString temp_path = temp_dir + "/fincept_cell_" + QString::number(QDateTime::currentMSecsSinceEpoch()) + "_" +
+                        QUuid::createUuid().toString(QUuid::Id128) + ".py";
 
     QFile file(temp_path);
     if (!file.open(QIODevice::WriteOnly | QIODevice::Text)) {
@@ -742,11 +770,57 @@ void PythonRunner::start_next() {
 // ── Extract JSON ─────────────────────────────────────────────────────────────
 
 QString extract_json(const QString& output) {
-    // Find the first '{' or '[' and return everything from that point.
-    // Scripts print multi-line indented JSON, so we cannot take a single line.
+    // Return the LAST complete top-level JSON value in the output.
+    //
+    // Script/agent stdout is frequently polluted with leading log lines — some
+    // of which contain braces (e.g. a Python dict repr like
+    // "ERROR ... {'error': {...}, 'status': 401}" leaked onto stdout by a
+    // third-party logger). The old "first '{' to end" logic grabbed that dict
+    // repr and QJsonDocument::fromJson() then returned null → the caller saw a
+    // spurious "exit=0" failure. Our scripts always print their real JSON
+    // envelope LAST, so we scan forward tracking brace/bracket depth (respecting
+    // double-quoted strings) and keep the final value whose depth returns to 0.
+    int best_start = -1, best_end = -1; // [start, end) of the last balanced value
+    int cur_start = -1, depth = 0;
+    bool in_str = false, esc = false;
+    for (int i = 0; i < output.size(); ++i) {
+        const QChar c = output[i];
+        if (in_str) {
+            if (esc)
+                esc = false;
+            else if (c == '\\')
+                esc = true;
+            else if (c == '"')
+                in_str = false;
+            continue;
+        }
+        if (c == '"') {
+            in_str = true;
+            continue;
+        }
+        if (depth == 0) {
+            if (c == '{' || c == '[') {
+                cur_start = i;
+                depth = 1;
+            }
+        } else {
+            if (c == '{' || c == '[') {
+                ++depth;
+            } else if (c == '}' || c == ']') {
+                if (--depth == 0) {
+                    best_start = cur_start;
+                    best_end = i + 1;
+                }
+            }
+        }
+    }
+
+    if (best_start >= 0)
+        return output.mid(best_start, best_end - best_start).trimmed();
+
+    // Fallback: original heuristic (first bracket to end) for partial output.
     int brace = output.indexOf('{');
     int bracket = output.indexOf('[');
-
     int start = -1;
     if (brace >= 0 && bracket >= 0)
         start = qMin(brace, bracket);
@@ -754,10 +828,8 @@ QString extract_json(const QString& output) {
         start = brace;
     else if (bracket >= 0)
         start = bracket;
-
     if (start < 0)
         return {};
-
     return output.mid(start).trimmed();
 }
 

@@ -9,6 +9,7 @@
 #include "screens/ai_quant_lab/QuantModulePanel_GsHelpers.h"
 #include "screens/ai_quant_lab/QuantModulePanel_Styles.h"
 
+#include "core/currency/Currency.h"
 #include "core/logging/Logger.h"
 #include "services/ai_quant_lab/AIQuantLabService.h"
 #include "services/file_manager/FileManagerService.h"
@@ -81,8 +82,16 @@ QWidget* QuantModulePanel::build_input_row(const QString& label, QWidget* input,
     auto* hl = new QHBoxLayout(row);
     hl->setContentsMargins(0, 2, 0, 2);
     hl->setSpacing(8);
-    auto* lbl = new QLabel(label, row);
+    auto* lbl = new QLabel(row);
     lbl->setFixedWidth(160);
+    // Bind "($)" unit hints to the preferred currency; others stay plain.
+    if (label.endsWith("($)")) {
+        QString base = label;
+        base.chop(3); // strip "($)"
+        cur::bindLabel(lbl, base + "(%1)");
+    } else {
+        lbl->setText(label);
+    }
     lbl->setStyleSheet(QString("color:%1; background:transparent;").arg(ui::colors::TEXT_SECONDARY()));
     hl->addWidget(lbl);
     hl->addWidget(input, 1);
@@ -165,6 +174,34 @@ void QuantModulePanel::refresh_theme() {
 
     if (status_label_)
         status_label_->setStyleSheet(QString("color:%1; background:transparent;").arg(ui::colors::TEXT_TERTIARY()));
+}
+
+// ── Re-translation ───────────────────────────────────────────────────────────
+// Static chrome only: re-apply tr() text to the persistent, member-stored
+// widgets. The module header (label/category) is data-derived and kept
+// verbatim; status_label_ is transient state set per-operation; dynamically
+// built input forms and result cards re-render in the active language on their
+// next build/fetch.
+
+void QuantModulePanel::changeEvent(QEvent* event) {
+    if (event->type() == QEvent::LanguageChange)
+        retranslateUi();
+    QWidget::changeEvent(event);
+}
+
+void QuantModulePanel::retranslateUi() {
+    // deep_agent / rd_agent persistent output surfaces
+    if (agent_output_)
+        agent_output_->setPlaceholderText(tr("Analysis results will appear here..."));
+    if (rd_agent_output_)
+        rd_agent_output_->setPlaceholderText(tr("Select a task and click GET FACTORS / GET MODEL to view results..."));
+    if (rd_task_table_)
+        rd_task_table_->setHorizontalHeaderLabels(
+            {tr("Task ID"), tr("Type"), tr("Status"), tr("Progress"), tr("Best IC"), tr("Elapsed")});
+
+    // rl_trading persistent controls
+    if (rl_train_button_)
+        rl_train_button_->setText(tr("TRAIN RL AGENT"));
 }
 
 void QuantModulePanel::connect_service() {

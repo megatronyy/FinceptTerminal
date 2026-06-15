@@ -9,6 +9,7 @@ Performance notes:
 - Uses optimized agent loader to avoid slow file scanning
 """
 
+import os
 import sys
 import json
 import logging
@@ -174,6 +175,14 @@ def main(args=None):
                 return json.dumps({"success": False, "error": "No payload provided"})
         else:
             payload_str = args[0]
+            if payload_str.startswith("@"):
+                fpath = payload_str[1:]
+                with open(fpath, "r", encoding="utf-8") as f:
+                    payload_str = f.read()
+                try:
+                    os.remove(fpath)
+                except OSError:
+                    pass
 
         payload = json.loads(payload_str)
         action = payload.get("action")
@@ -227,7 +236,15 @@ def main(args=None):
             print(json.dumps(result), flush=True)
             return ""
         else:
-            result = dispatch_action(action, api_keys, params, config)
+            # Keep stdout pristine for the single JSON envelope. Some agent/LLM
+            # SDKs log to stdout directly (rich-style consoles that bypass the
+            # stderr logging config above); those brace-containing lines would
+            # otherwise corrupt the JSON the C++ side parses. Route everything
+            # the action prints to stderr; main()'s final print() (after this
+            # returns, stdout restored) emits the clean envelope.
+            import contextlib
+            with contextlib.redirect_stdout(sys.stderr):
+                result = dispatch_action(action, api_keys, params, config)
             return json.dumps(result)
 
     except json.JSONDecodeError as e:

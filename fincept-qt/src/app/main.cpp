@@ -1,8 +1,14 @@
-﻿#include "services/llm/LlmService.h"
+﻿#include "algo_engine/AlgoEngineProducer.h"
+#include "algo_engine/ScanMonitor.h"
+#include "algo_engine/UniverseScanSelftest.h"
+#include "algo_engine/fno/FnoAlgoSelftest.h"
+#include "services/llm/LlmService.h"
+#include "ui/notifications/DesktopNotifier.h"
 #include "app/MonitorPickerDialog.h"
+#include "app/ScreenSmokeTest.h"
 #include "app/WindowFrame.h"
 #include "app/TerminalShell.h"
-#include "core/keys/WindowCycler.h"
+#include "core/window/WindowRegistry.h"
 #include "auth/AuthManager.h"
 #include "auth/InactivityGuard.h"
 #include "auth/PinManager.h"
@@ -12,8 +18,10 @@
 #include "core/config/ProfileManager.h"
 #include "core/components/ComponentCatalog.h"
 #include "core/crash/CrashHandler.h"
+#include "core/currency/CurrencyManager.h"
 #include "core/i18n/LanguageManager.h"
 #include "core/keys/KeyConfigManager.h"
+#include "core/layout/DockLayoutSelftest.h"
 #include "core/logging/Logger.h"
 #include "core/session/ScreenStateManager.h"
 #include "core/session/SessionManager.h"
@@ -21,6 +29,12 @@
 #include "core/symbol/SymbolRef.h"
 #include "datahub/DataHubMetaTypes.h"
 #include "mcp/McpInit.h"
+#include "mcp/ToolSelfTest.h"
+#include "services/alpha_arena/ArenaSelftest.h"
+#include "services/feeds/FeedSelfTest.h"
+#include "trading/PaperTradingSelftest.h"
+#include "trading/UnifiedPortfolioService.h"
+#include "trading/replication/PortfolioReplicationSelftest.h"
 #include "network/http/HttpClient.h"
 #include "python/PythonSetupManager.h"
 #include "screens/launchpad/LaunchpadScreen.h"
@@ -41,8 +55,9 @@
 #include "services/options/FiiDiiService.h"
 #include "services/options/OISnapshotter.h"
 #include "services/options/OptionChainService.h"
-#include "services/alpha_arena/AlphaArenaEngine.h"
+#include "services/alpha_arena/ArenaEngine.h"
 #include "services/news/NewsService.h"
+#include "services/notebooks/NotebookLibraryService.h"
 #include "services/polymarket/PolymarketWebSocket.h"
 #include "services/prediction/PredictionCredentialStore.h"
 #include "services/prediction/PredictionExchangeRegistry.h"
@@ -62,20 +77,36 @@
 #include "services/wallet/TokenMetadataService.h"
 #include "services/wallet/TreasuryService.h"
 #include "services/wallet/WalletService.h"
+#include "trading/AccountManager.h"
 #include "trading/DataStreamManager.h"
 #include "trading/ExchangeService.h"
+#include "trading/PaperMarkService.h"
 #include "trading/ExchangeSessionManager.h"
+#include "storage/HistoricalDataStore.h"
 #include "storage/repositories/NewsArticleRepository.h"
 #include "storage/repositories/SettingsRepository.h"
 #include "storage/sqlite/CacheDatabase.h"
 #include "storage/sqlite/Database.h"
 #include "storage/sqlite/migrations/MigrationRunner.h"
+#include "services/cloud/AgentConfigCloudAdapter.h"
+#include "services/cloud/CloudSyncEngine.h"
+#include "services/cloud/DashboardCloudAdapter.h"
+#include "services/cloud/NewsFeedCloudAdapter.h"
+#include "services/cloud/NewsMonitorCloudAdapter.h"
+#include "services/cloud/NotebookCloudAdapter.h"
+#include "services/cloud/NotesCloudAdapter.h"
+#include "services/cloud/PortfolioCloudAdapter.h"
+#include "services/cloud/ReportCloudAdapter.h"
+#include "services/cloud/SettingsCloudAdapter.h"
+#include "services/cloud/WatchlistCloudAdapter.h"
+#include "services/cloud/WorkflowCloudAdapter.h"
 #include "ui/theme/Theme.h"
 #include "ui/theme/ThemeManager.h"
 
 #include <QCoreApplication>
 #include <QDir>
 #include <QFile>
+#include <QGuiApplication>
 #include <QLibrary>
 #include <QPointer>
 #include <QSqlDatabase>
@@ -85,6 +116,8 @@
 #include <QTimer>
 #include <QUuid>
 
+#include <algorithm>
+#include <cstdio>
 #include <memory>
 
 #include "app/InstanceLock.h"
@@ -95,21 +128,40 @@
 
 // Wire the two app-level lifecycle handlers that fire after the primary
 // window exists: InstanceLock::message_received (a re-launch of the exe
-// asks us to open another WindowFrame — args ignored, the request itself is
-// the trigger) and QApplication::lastWindowClosed (surface the Launchpad
+// asks us to bring the running instance to the front — args ignored, the
+// request itself is the trigger) and QApplication::lastWindowClosed (surface the Launchpad
 // instead of quitting; the Launchpad's own close handler quits explicitly).
 // Called from both the post-setup-screen path and the no-setup path so the
 // two branches stay in sync.
 static void wire_app_lifecycle(QApplication& app, fincept::InstanceLock& lock) {
     QObject::connect(&lock, &fincept::InstanceLock::message_received,
                      [](const QStringList& /*args*/) {
-                         // Route through the same picker the toolbar uses so
-                         // secondary-instance launches respect the user's
-                         // monitor choice on multi-monitor setups. Picker
-                         // short-circuits on single-monitor systems, so this
-                         // is a no-op cost there.
-                         fincept::WindowCycler::instance().new_window_on_next_monitor();
-                         LOG_INFO("App", "New window opened via secondary instance request");
+                         // Re-launching the exe while an instance is already
+                         // running means "bring the running instance forward" —
+                         // the standard single-instance behaviour — NOT "open a
+                         // new window". Opening a new window (and the monitor
+                         // picker that goes with it) stays an EXPLICIT action:
+                         // the toolbar "New Window", Ctrl+Shift+N, the Launchpad
+                         // button, and tear-off. Routing relaunches through the
+                         // picker surprised users by prompting for a monitor on
+                         // every open even when they never asked for a new window.
+                         const auto frames = fincept::WindowRegistry::instance().frames();
+                         if (!frames.isEmpty()) {
+                             // Lowest window_id (the primary) is the predictable
+                             // target. Activating one window pulls the whole app
+                             // forward on every platform we support.
+                             fincept::WindowFrame* target = frames.first();
+                             if (target->isMinimized())
+                                 target->showNormal();
+                             target->raise();
+                             target->activateWindow();
+                             LOG_INFO("App", "Secondary instance request — raised existing window");
+                         } else {
+                             // No live frames (e.g. the user closed to the
+                             // Launchpad). Surface it instead of silently no-op'ing.
+                             fincept::screens::LaunchpadScreen::instance()->surface();
+                             LOG_INFO("App", "Secondary instance request — surfaced Launchpad");
+                         }
                      });
     QObject::connect(&app, &QApplication::lastWindowClosed, &app, []() {
         // Settings → General → "On last window close" controls behaviour.
@@ -375,10 +427,10 @@ int main(int argc, char* argv[]) {
         fincept::trading::ExchangeSessionManager::instance().ensure_registered_with_hub();
         // Prediction Markets — `prediction:polymarket:*`.
         fincept::services::polymarket::PolymarketWebSocket::instance().ensure_registered_with_hub();
-        // Alpha Arena engine — TickClock, ModelDispatcher, OrderRouter,
-        // PaperVenue. Not a DataHub Producer (callback-style by design).
-        // init() is idempotent; pre-resolves crash-recovery state.
-        fincept::services::alpha_arena::AlphaArenaEngine::instance().init();
+        // Alpha Arena engine — init() is idempotent and only scans for
+        // crashed competitions (no-op with none). Not a DataHub Producer
+        // (callback-style by design).
+        fincept::arena::ArenaEngine::instance().init();
         {
             auto& reg = fincept::services::prediction::PredictionExchangeRegistry::instance();
             reg.register_adapter(
@@ -415,6 +467,36 @@ int main(int argc, char* argv[]) {
         // Wallet — `wallet:balance:*`, `market:price:token:*`.
         fincept::wallet::WalletService::instance().ensure_registered_with_hub();
         fincept::wallet::WalletService::instance().restore_from_storage();
+
+        // Algo Engine — `algo:metrics:*`, `algo:trade:*`, `algo:state:*`.
+        fincept::algo::AlgoEngineProducer::instance().ensure_registered_with_hub();
+
+        // Fincept Cloud sync — drains the durable outbox (push) + pulls cloud→local.
+        // NOT a DataHub producer; reads stay on the local repo cache. Adapters are
+        // registered before initialize(). See fincept-qt/CLOUD_SYNC_PLAN.md.
+        fincept::services::cloud::CloudSyncEngine::instance().register_adapter(
+            &fincept::services::cloud::WatchlistCloudAdapter::instance());
+        fincept::services::cloud::CloudSyncEngine::instance().register_adapter(
+            &fincept::services::cloud::NotesCloudAdapter::instance());
+        fincept::services::cloud::CloudSyncEngine::instance().register_adapter(
+            &fincept::services::cloud::PortfolioCloudAdapter::instance());
+        fincept::services::cloud::CloudSyncEngine::instance().register_adapter(
+            &fincept::services::cloud::AgentConfigCloudAdapter::instance());
+        fincept::services::cloud::CloudSyncEngine::instance().register_adapter(
+            &fincept::services::cloud::ReportCloudAdapter::instance());
+        fincept::services::cloud::CloudSyncEngine::instance().register_adapter(
+            &fincept::services::cloud::WorkflowCloudAdapter::instance());
+        fincept::services::cloud::CloudSyncEngine::instance().register_adapter(
+            &fincept::services::cloud::DashboardCloudAdapter::instance());
+        fincept::services::cloud::CloudSyncEngine::instance().register_adapter(
+            &fincept::services::cloud::SettingsCloudAdapter::instance());
+        fincept::services::cloud::CloudSyncEngine::instance().register_adapter(
+            &fincept::services::cloud::NewsMonitorCloudAdapter::instance());
+        fincept::services::cloud::CloudSyncEngine::instance().register_adapter(
+            &fincept::services::cloud::NewsFeedCloudAdapter::instance());
+        fincept::services::cloud::CloudSyncEngine::instance().register_adapter(
+            &fincept::services::cloud::NotebookCloudAdapter::instance());
+        fincept::services::cloud::CloudSyncEngine::instance().initialize();
 
         // Fee-discount eligibility producer (paid screens only).
         {
@@ -492,6 +574,22 @@ int main(int argc, char* argv[]) {
             hub.set_policy_pattern(QStringLiteral("billing:tier:*"), tier_p);
         }
 
+        // Broker session monitor — re-validates each connected broker account's
+        // access token on a 5-min cadence and silently refreshes where supported
+        // (Zerodha/Angel One TOTP re-login, Fyers refresh token). Keeps the
+        // connection indicator honest instead of showing a stale "green".
+        fincept::trading::AccountManager::instance().start_session_monitor();
+
+        // Periodically auto-download historical candles for any watchlisted
+        // series. Double-gated to a no-op: does nothing unless the Historify
+        // watchlist has entries AND a broker account is connected.
+        auto* historify_timer = new QTimer(qApp);
+        historify_timer->setInterval(15 * 60 * 1000); // 15 min
+        QObject::connect(historify_timer, &QTimer::timeout, qApp, []() {
+            fincept::storage::HistoricalDataStore::instance().refresh_watchlist();
+        });
+        historify_timer->start();
+
         LOG_INFO("App", "Deferred service init complete");
     });
 
@@ -542,6 +640,11 @@ int main(int argc, char* argv[]) {
 
     fincept::Logger::instance().set_file(fincept::AppPaths::logs() + "/fincept.log");
 
+    // Seed the prebuilt Fincept Notebook library into the File Manager on first
+    // run (idempotent — guarded by a marker file). Makes the curated notebooks
+    // appear in both the Notebook Library and the File Manager out of the box.
+    fincept::services::NotebookLibraryService::instance().seed_into_files();
+
     // P3.18 — route Qt's own qDebug/qWarning/qCritical messages into our log
     // file so framework/3rd-party warnings are visible in Release builds.
     qInstallMessageHandler([](QtMsgType type, const QMessageLogContext& ctx, const QString& msg) {
@@ -583,7 +686,7 @@ int main(int argc, char* argv[]) {
                 log.set_tag_level(tag, lvl_map.value(level));
         }
     }
-    LOG_INFO("App", "Fincept Terminal v4.0.3 starting...");
+    LOG_INFO("App", "Fincept Terminal v4.1.0 starting...");
     LOG_INFO("App", QString("TLS backend: %1 (available: %2)")
                         .arg(QSslSocket::activeBackend(),
                              QSslSocket::availableBackends().join(", ")));
@@ -628,6 +731,25 @@ int main(int argc, char* argv[]) {
     fincept::register_migration_v029();
     fincept::register_migration_v030();
     fincept::register_migration_v031();
+    fincept::register_migration_v032();
+    fincept::register_migration_v033();
+    fincept::register_migration_v034();
+    fincept::register_migration_v035();
+    fincept::register_migration_v036();
+    fincept::register_migration_v037();
+    fincept::register_migration_v038();
+    fincept::register_migration_v039();
+    fincept::register_migration_v040();
+    fincept::register_migration_v041();
+    fincept::register_migration_v042();
+    fincept::register_migration_v043();
+    fincept::register_migration_v044();
+    fincept::register_migration_v045();
+    fincept::register_migration_v046();
+    fincept::register_migration_v047();
+    fincept::register_migration_v048();
+    fincept::register_migration_v049();
+    fincept::register_migration_v050();
 
     // Open main database
     QString db_path = fincept::AppPaths::data() + "/fincept.db";
@@ -637,6 +759,14 @@ int main(int argc, char* argv[]) {
         // DB unavailable — apply theme with built-in defaults so the UI is at least styled
         fincept::ui::apply_global_stylesheet();
     } else {
+        // Load broker accounts now that the DB is open. The AccountManager
+        // singleton loads eagerly in its constructor on first access; if anything
+        // touched it before this point (before open()), it found an unusable DB
+        // and loaded nothing. This explicit main-thread reload guarantees the
+        // account map is populated from the now-open DB, so configured brokers
+        // survive restarts instead of vanishing.
+        fincept::trading::AccountManager::instance().reload_from_db();
+
         // Prune news articles older than 30 days — deferred to run after the event loop
         // starts so the startup critical path is not blocked.
         // NewsArticleRepository uses the main-thread DB connection (not thread-safe),
@@ -671,6 +801,10 @@ int main(int argc, char* argv[]) {
         // any windows are shown — eliminates an English-flash on first paint
         // when the user has previously chosen another language.
         fincept::i18n::LanguageManager::instance().initialize();
+
+        // Load persisted display-currency preference so the symbol is correct
+        // on first paint of any calculator/analytics surface.
+        fincept::currency::CurrencyManager::instance().initialize();
     }
 
     // Open cache database (non-fatal if fails)
@@ -759,12 +893,75 @@ int main(int argc, char* argv[]) {
     // external MCP servers in the background (non-blocking).
     fincept::mcp::initialize_all_tools();
 
+    // ── Headless tool-system self-test / catalog dump ────────────────────────
+    // Runs after the real tool registration above but before any window or
+    // network init, so it exercises exactly what ships. Exits without starting
+    // the GUI — used by the dev loop and CI to measure tool retrieval recall
+    // and registry integrity (no LLM / API key required).
+    for (int i = 1; i < argc; ++i) {
+        if (qstrcmp(argv[i], "--selftest-tools") == 0)
+            return fincept::mcp::run_tool_selftest();
+        if (qstrcmp(argv[i], "--dump-tools") == 0)
+            return fincept::mcp::dump_tools_json();
+        if (qstrcmp(argv[i], "--selftest-feeds") == 0)
+            return fincept::feeds::run_feed_selftest();
+        if (qstrcmp(argv[i], "--selftest-dock-layout") == 0)
+            return fincept::layout::run_dock_layout_selftest();
+        if (qstrcmp(argv[i], "--selftest-fno-algo") == 0)
+            return fincept::algo::fno::run_fno_algo_selftest();
+        if (qstrcmp(argv[i], "--selftest-universe-scan") == 0)
+            return fincept::algo::run_universe_scan_selftest();
+        if (qstrcmp(argv[i], "--selftest-paper") == 0)
+            return fincept::trading::run_paper_trading_selftest();
+        if (qstrcmp(argv[i], "--selftest-portfolio-monitor") == 0)
+            return fincept::trading::run_portfolio_monitor_selftest();
+        if (qstrcmp(argv[i], "--selftest-portfolio-replication") == 0)
+            return fincept::trading::replication::run_portfolio_replication_selftest();
+        if (qstrcmp(argv[i], "--selftest-arena") == 0)
+            return fincept::arena::run_arena_selftest();
+    }
+
+    // Start the scan-watch background service. Runs after Database::open() (which
+    // applies the scan_watches migration) and after bootstrap_auth() (broker
+    // creds, needed by the first candle poll), and after the headless self-test
+    // early-returns above so it is skipped on --selftest-tools / --dump-tools.
+    // Placed before the Python-setup branch so both GUI paths (setup screen and
+    // normal startup) start it exactly once. Candle fetching is native C++ (broker
+    // REST / native Yahoo), so it does not require the Python env to be ready.
+    fincept::algo::ScanMonitor::instance().start();
+
+    // Centralized paper mark-to-market + order matching. Runs independent of which
+    // screen is open so paper positions (equity AND F&O) keep their P&L live and
+    // resting limit/stop/SL-TP orders fill continuously — not only while the
+    // Equity tab is focused. Placed alongside ScanMonitor (after the self-test
+    // early-returns, so it stays off in headless --selftest runs).
+    fincept::trading::PaperMarkService::instance().start();
+
+    // Native desktop notifications (Win toast / macOS Notification Center / Linux
+    // libnotify) via a tray icon — also surfaces every in-app ToastService toast.
+    fincept::ui::DesktopNotifier::instance().init();
+
     // ── Python environment check ─────────────────────────────────────────────
     // check_status() fast path (sentinel + markers present) is synchronous and
     // cheap. The slow path (first run) can spawn processes — but at this point
     // no window is visible yet so the brief block is acceptable. The SetupScreen
     // itself offloads prefill_completed_steps() to a background thread (P1).
     auto setup_status = fincept::python::PythonSetupManager::instance().check_status();
+
+    // --smoke-test: CI/clean-machine screen-construction walk. Force the normal
+    // boot path (we need a real WindowFrame + router to navigate every screen),
+    // and skip the Python first-run SetupScreen — the smoke test only verifies
+    // that screens CONSTRUCT on the bundled runtime, not that data fetches work.
+    // The actual walk is scheduled just after the primary window is shown.
+    bool smoke_mode = false;
+    for (int i = 1; i < argc; ++i) {
+        if (qstrcmp(argv[i], "--smoke-test") == 0)
+            smoke_mode = true;
+    }
+    if (smoke_mode) {
+        LOG_INFO("Smoke", "Smoke-test mode — forcing normal boot, skipping setup/recovery");
+        setup_status.needs_setup = false;
+    }
 
     if (setup_status.needs_setup) {
         LOG_INFO("App", "Python environment not ready — showing setup screen");
@@ -804,29 +1001,15 @@ int main(int argc, char* argv[]) {
             }
 
             if (!recovered) {
-                auto* window = new fincept::WindowFrame(0); // primary window
-                window->setAttribute(Qt::WA_DeleteOnClose);
-                window->show();
-            }
-
-            // Restore any secondary windows that were open at last shutdown so
-            // multi-monitor layouts survive across relaunches. Each window
-            // restores its own geometry + dock layout from SessionManager.
-            // Skip when recovered — WorkspaceShell::apply has already built
-            // the right frame set.
-            if (!recovered)
-            {
+                // Single primary window by default — see the matching no-setup
+                // path below for the full rationale. Extra windows stay an
+                // explicit user action ("New Window" / Ctrl+Shift+N / tear-off).
                 const QList<int> saved_ids =
                     fincept::SessionManager::instance().load_window_ids();
-                for (int id : saved_ids) {
-                    if (id <= 0) continue; // 0 = primary, already created
-                    auto* w = new fincept::WindowFrame(id);
-                    w->setAttribute(Qt::WA_DeleteOnClose);
-                    w->show();
-                }
-                if (!saved_ids.isEmpty())
-                    LOG_INFO("App", QString("Restored %1 secondary window(s) from last session")
-                                        .arg(saved_ids.size() > 0 ? saved_ids.size() - 1 : 0));
+                const int primary_id = saved_ids.isEmpty() ? 0 : saved_ids.first();
+                auto* window = new fincept::WindowFrame(primary_id);
+                window->setAttribute(Qt::WA_DeleteOnClose);
+                window->show();
             }
 
             // Wire new-window handler + Launchpad surface now that the
@@ -859,39 +1042,46 @@ int main(int argc, char* argv[]) {
     // secondary-window restoration paths to avoid duplicating windows.
     bool recovered = false;
     if (auto* recovery = fincept::TerminalShell::instance().crash_recovery();
-        recovery && recovery->needs_recovery()) {
+        !smoke_mode && recovery && recovery->needs_recovery()) {
         fincept::screens::CrashRecoveryDialog dlg(
             recovery, fincept::TerminalShell::instance().snapshot_ring());
         dlg.exec();
         recovered = dlg.was_restored();
     }
 
-    // Heap-allocate the primary window so we can skip it on a successful
-    // recovery without leaving a dead stack object behind. WA_DeleteOnClose
-    // matches the secondary-window lifecycle below.
-    if (!recovered) {
-        auto* primary = new fincept::WindowFrame(0);
-        primary->setAttribute(Qt::WA_DeleteOnClose);
-        primary->show();
-    }
-
-    // Restore any secondary windows that were open at last shutdown. The
-    // primary window owns its own lifetime via WA_DeleteOnClose; restored
-    // secondaries use WA_DeleteOnClose and self-remove from
-    // QApplication::topLevelWidgets. Skip when recovered — WorkspaceShell
-    // has already built the right frame set.
+    // Restore a SINGLE primary window at startup. The previous session may
+    // have had several windows spread across multiple monitors, but auto-
+    // reopening all of them surprised multi-monitor users — every launch
+    // popped a second terminal on the second screen. Opening additional
+    // windows stays an EXPLICIT action (toolbar "New Window", Ctrl+Shift+N,
+    // the Launchpad button, tear-off), consistent with the single-instance
+    // relaunch policy in wire_app_lifecycle(). We reopen the lowest saved
+    // window_id (the primary) so its geometry + dock layout come back; the
+    // user spawns extra windows on demand. closeEvent self-heals the saved
+    // id set to the surviving windows, so this converges to [primary] cleanly.
     if (!recovered) {
         const QList<int> saved_ids =
             fincept::SessionManager::instance().load_window_ids();
-        for (int id : saved_ids) {
-            if (id <= 0) continue; // 0 = primary, already created
-            auto* w = new fincept::WindowFrame(id);
-            w->setAttribute(Qt::WA_DeleteOnClose);
-            w->show();
+        const int primary_id = saved_ids.isEmpty() ? 0 : saved_ids.first();
+        auto* primary = new fincept::WindowFrame(primary_id);
+        primary->setAttribute(Qt::WA_DeleteOnClose);
+        primary->show();
+
+        // Smoke test: once the window has painted, walk every screen and exit
+        // with the result. Deferred so the shell + router are fully wired. The
+        // CI job runs this with Qt/VS stripped from PATH, so a missing bundled
+        // runtime (DLL, plugin, or data file like QtWebEngineProcess.exe) shows
+        // up as a hard process abort or a non-constructing screen here — exactly
+        // the class of failure the static dependency gate cannot detect.
+        if (smoke_mode) {
+            QPointer<fincept::WindowFrame> w = primary;
+            QTimer::singleShot(2500, &app, [w]() {
+                const int rc = fincept::run_screen_smoke_test(w ? w->dock_router() : nullptr);
+                std::fprintf(stderr, "[Smoke] exit %d\n", rc);
+                std::fflush(stderr);
+                QCoreApplication::exit(rc);
+            });
         }
-        if (saved_ids.size() > 1)
-            LOG_INFO("App", QString("Restored %1 secondary window(s) from last session")
-                                .arg(saved_ids.size() - 1));
     }
 
     // Wire new-window handler + Launchpad surface — see wire_app_lifecycle()

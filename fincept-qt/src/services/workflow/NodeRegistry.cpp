@@ -14,6 +14,7 @@
 #include "services/workflow/nodes/TradingNodes.h"
 #include "services/workflow/nodes/TriggerNodes.h"
 #include "services/workflow/nodes/UtilityNodes.h"
+#include "services/workflow/nodes/DataSourceNodes.h"
 
 #include <QRegularExpression>
 
@@ -311,6 +312,9 @@ void NodeRegistry::register_builtin_nodes() {
     register_file_nodes(*this);
     register_data_format_nodes(*this);
     register_integration_nodes(*this);
+
+    // ── Register Data Source connectors dynamically ────────────────
+    register_datasource_nodes(*this);
 
     // Wire service bridges (connects nullptr executors to real services)
     wire_all_bridges(*this);

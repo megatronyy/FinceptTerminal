@@ -197,6 +197,44 @@ void ScreenStateManager::write_async_by_uuid(const QString& instance_uuid,
     });
 }
 
+// ── Synchronous saves (shutdown only) ────────────────────────────────────────
+
+namespace {
+QJsonObject to_json_obj(const QVariantMap& state) {
+    QJsonObject obj;
+    for (auto it = state.constBegin(); it != state.constEnd(); ++it)
+        obj.insert(it.key(), QJsonValue::fromVariant(it.value()));
+    return obj;
+}
+} // namespace
+
+void ScreenStateManager::save_now_sync(screens::IStatefulScreen* screen) {
+    if (!screen)
+        return;
+    screen->flush_pending_state();
+    const QString key = screen->state_key();
+    pending_saves_.remove(key);
+    auto r = TabSessionStore::instance().save_screen_state(
+        key, to_json_obj(screen->save_state()), screen->state_version(), session_id_);
+    if (r.is_err())
+        LOG_WARN("ScreenState", "save_now_sync failed for '" + key + "': " + QString::fromStdString(r.error()));
+}
+
+void ScreenStateManager::save_now_by_uuid_sync(screens::IStatefulScreen* screen,
+                                               const QString& instance_uuid) {
+    if (!screen || instance_uuid.isEmpty())
+        return;
+    screen->flush_pending_state();
+    const QString screen_key = screen->state_key();
+    pending_uuid_saves_.remove(instance_uuid);
+    auto r = TabSessionStore::instance().save_screen_state_by_uuid(
+        instance_uuid, screen_key, to_json_obj(screen->save_state()), screen->state_version(),
+        session_id_);
+    if (r.is_err())
+        LOG_WARN("ScreenState", QString("save_now_by_uuid_sync failed for %1 (%2): %3")
+                                    .arg(instance_uuid, screen_key, QString::fromStdString(r.error())));
+}
+
 // ── UUID-keyed public API ────────────────────────────────────────────────────
 
 void ScreenStateManager::restore_by_uuid(screens::IStatefulScreen* screen,
@@ -211,10 +249,11 @@ void ScreenStateManager::restore_by_uuid(screens::IStatefulScreen* screen,
     if (by_uuid.is_err()) {
         LOG_WARN("ScreenState", QString("UUID load failed for %1: %2")
                                     .arg(instance_uuid, QString::fromStdString(by_uuid.error())));
-        return;
+        // Fall through to legacy path — a transient DB error (SQLITE_BUSY,
+        // corrupt WAL) should not prevent fallback when a legacy row exists.
     }
 
-    QJsonObject obj = by_uuid.value();
+    QJsonObject obj = by_uuid.is_ok() ? by_uuid.value() : QJsonObject{};
     if (obj.isEmpty() && fallback_to_screen_key) {
         // No UUID-keyed row yet. Fall back to the legacy screen_key path
         // so users upgrading from a pre-Phase-4b build keep their state.

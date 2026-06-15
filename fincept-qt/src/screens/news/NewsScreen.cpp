@@ -11,6 +11,7 @@
 #include "screens/news/NewsSidePanel.h"
 #include "screens/news/NewsTickerStrip.h"
 #include "screens/news/dialogs/RssFeedManagerDialog.h"
+#include "services/cloud/CloudSyncEngine.h"
 #include "services/news/NewsCorrelationService.h"
 #include "services/news/NewsNlpService.h"
 #include "services/notifications/NotificationService.h"
@@ -51,6 +52,14 @@ NewsScreen::NewsScreen(QWidget* parent) : QWidget(parent) {
 
     build_ui();
     connect_signals();
+
+    // Push the persisted preferences into the command bar so the pill
+    // highlights (category / time / REL-NEW sort / WIRE-CLST view) reflect the
+    // restored state on first paint instead of their hardcoded defaults.
+    command_bar_->set_active_category(active_category_);
+    command_bar_->set_active_time_range(time_range_);
+    command_bar_->set_active_sort(sort_mode_);
+    command_bar_->set_active_view(view_mode_);
 
     // Drop a symbol anywhere on the News screen to filter the feed by that
     // ticker. Reuses the search-query pipeline so caching/highlighting stay
@@ -116,7 +125,7 @@ void NewsScreen::connect_signals() {
                 if (command_bar_)
                     command_bar_->set_live_state(connected);
             });
-    connect(command_bar_, &NewsCommandBar::live_toggle_clicked, this, [this]() {
+    connect(command_bar_, &NewsCommandBar::live_toggle_clicked, this, []() {
         auto& svc = services::NewsService::instance();
         if (svc.is_live_connected()) {
             svc.disconnect_live_feed();
@@ -324,6 +333,9 @@ void NewsScreen::showEvent(QShowEvent* e) {
     visible_ = true;
     ticker_strip_->resume();
     pulse_timer_->start();
+    // Rate-gated pull of cloud news monitors + feeds on screen entry (no-op when sync is off).
+    fincept::services::cloud::CloudSyncEngine::instance().request_pull(QStringLiteral("news_monitor"));
+    fincept::services::cloud::CloudSyncEngine::instance().request_pull(QStringLiteral("news_feed"));
     {
         QSettings s;
         s.beginGroup("news");
@@ -490,6 +502,11 @@ void NewsScreen::on_manage_sources() {
 void NewsScreen::on_article_clicked(const services::NewsArticle& article) {
     detail_panel_->show_article(article);
     feed_panel_->set_selected(article.id);
+
+    // Re-show a previously-run AI analysis for this article, if one was saved.
+    // Only a fresh ANALYZE click re-fetches/overwrites it.
+    if (auto cached = services::NewsService::instance().cached_analysis(article.link))
+        detail_panel_->show_analysis(*cached);
 
     // Find related articles from the same cluster
     for (const auto& cluster : clusters_) {
@@ -1207,8 +1224,12 @@ void NewsScreen::restore_state(const QVariantMap& state) {
     search_query_.clear();
     active_variant_ = state.value("variant", "FULL").toString();
 
-    if (command_bar_)
+    if (command_bar_) {
         command_bar_->set_active_category(active_category_);
+        command_bar_->set_active_time_range(time_range_);
+        command_bar_->set_active_sort(sort_mode_);
+        command_bar_->set_active_view(view_mode_);
+    }
 }
 
 } // namespace fincept::screens

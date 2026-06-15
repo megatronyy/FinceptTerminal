@@ -7,8 +7,10 @@
 #pragma once
 
 #include "services/economics/EconomicsService.h"
+#include "ui/widgets/PaginationBar.h"
 
 #include <QDate>
+#include <QEvent>
 #include <QJsonArray>
 #include <QLabel>
 #include <QListWidget>
@@ -27,6 +29,11 @@ class EconPanelBase : public QWidget {
     /// Called by EconomicsScreen when user switches to this panel.
     virtual void activate() = 0;
 
+    /// Panel-level state for persistence (text fields, selections).
+    /// Default returns empty — subclasses override to save their inputs.
+    virtual QVariantMap save_panel_state() const { return {}; }
+    virtual void restore_panel_state(const QVariantMap& /*state*/) {}
+
   protected:
     // ── Subclass API ──────────────────────────────────────────────────────────
     /// Add source-specific controls into the toolbar layout.
@@ -40,9 +47,10 @@ class EconPanelBase : public QWidget {
     void build_base_ui(QWidget* container);
 
     // ── State helpers ─────────────────────────────────────────────────────────
-    void show_loading(const QString& msg = "Fetching data…");
+    // Empty msg → a translated default is used (see .cpp).
+    void show_loading(const QString& msg = {});
     void show_error(const QString& msg);
-    void show_empty(const QString& msg = "Select parameters and click FETCH");
+    void show_empty(const QString& msg = {});
     void show_table();
 
     /// Populate the shared table + update stat cards.
@@ -54,6 +62,14 @@ class EconPanelBase : public QWidget {
 
     /// Called when theme changes — re-applies panel_style(). Override for extra widgets.
     virtual void refresh_panel_theme();
+
+    // ── i18n ──────────────────────────────────────────────────────────────────
+    void changeEvent(QEvent* event) override;
+    /// Re-apply tr() lookups to the shared base widgets (FETCH/CSV buttons, stat
+    /// card labels, current status message, record count). Subclasses that have
+    /// their own translatable widgets override retranslateUi() and call this base
+    /// implementation at the end.
+    virtual void retranslateUi();
 
     // ── Shared utilities ──────────────────────────────────────────────────────
     /// Filter a QListWidget by hiding items that don't contain text (case-insensitive).
@@ -83,15 +99,33 @@ class EconPanelBase : public QWidget {
 
   private:
     void update_stats(const QJsonArray& rows);
+    void render_page();
 
-    QWidget* container_ = nullptr; // root widget that owns panel_style()
+    QWidget* container_ = nullptr;
     QWidget* cards_row_ = nullptr;
     QWidget* title_bar_ = nullptr;
-    QStackedWidget* stack_ = nullptr; // 0=empty/status  1=table
+    QStackedWidget* stack_ = nullptr; // 0=empty/status  1=table+pager
     QLabel* empty_lbl_ = nullptr;
     QTableWidget* table_ = nullptr;
     QLabel* title_lbl_ = nullptr;
     QLabel* row_count_ = nullptr;
+    ui::PaginationBar* pager_ = nullptr;
+
+    // Stat-card title labels (cached for retranslateUi)
+    QLabel* stat_latest_lbl_ = nullptr;
+    QLabel* stat_change_lbl_ = nullptr;
+    QLabel* stat_min_lbl_ = nullptr;
+    QLabel* stat_max_lbl_ = nullptr;
+    QLabel* stat_avg_lbl_ = nullptr;
+    QLabel* stat_count_lbl_ = nullptr;
+
+    // Last status shown — so a language switch can re-render the message.
+    enum class StatusKind { Empty, Loading, Error };
+    StatusKind status_kind_ = StatusKind::Empty;
+    QString status_msg_; // raw message last passed to show_empty/loading/error
+
+    QJsonArray all_rows_;
+    QStringList columns_;
 };
 
 } // namespace fincept::screens

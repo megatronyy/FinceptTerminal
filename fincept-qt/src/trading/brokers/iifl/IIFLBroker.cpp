@@ -1,6 +1,7 @@
 #include "trading/brokers/iifl/IIFLBroker.h"
 
 #include "trading/brokers/BrokerHttp.h"
+#include "trading/brokers/BrokerTokenUtil.h"
 
 #include <QDateTime>
 #include <QJsonArray>
@@ -204,7 +205,19 @@ TokenExchangeResponse IIFLBroker::exchange_token(const QString& api_key, const Q
 
     // Pack both tokens
     QString packed_token = trade_token + ":::" + feed_token;
-    return {true, packed_token, user_id, "", "", ""};
+    // IIFL XTS tokens (interactive + market) are minted from the appKey/secret
+    // pairs stored in api_key/api_secret — both are persisted, so the session is
+    // silently re-mintable. Tokens lapse at the daily reset.
+    const QString extra = with_token_expiry({}, next_ist_flush_epoch(6, 0));
+    return {true, packed_token, user_id, "", extra, ""};
+}
+
+// Silent refresh = re-run the XTS interactive + market logins from the stored
+// appKey/secret pairs (no TOTP/web code involved).
+TokenExchangeResponse IIFLBroker::refresh_session(const BrokerCredentials& creds) {
+    if (creds.api_key.isEmpty() || creds.api_secret.isEmpty())
+        return {false, "", "", "", "", "IIFL silent refresh requires stored app/secret keys"};
+    return exchange_token(creds.api_key, creds.api_secret, QString());
 }
 
 // ---------- place_order ----------
@@ -427,6 +440,7 @@ ApiResponse<QVector<BrokerPosition>> IIFLBroker::get_positions(const BrokerCrede
         pos.avg_price = o.value("AveragePrice").toDouble();
         pos.ltp = o.value("LastPrice").toDouble();
         pos.pnl = o.value("UnrealizedMTM").toDouble();
+        pos.pnl_pct = (pos.avg_price > 0.0) ? ((pos.ltp - pos.avg_price) / pos.avg_price) * 100.0 : 0.0;
         pos.product_type = o.value("ProductType").toString();
         positions.append(pos);
     }
@@ -472,7 +486,10 @@ ApiResponse<QVector<BrokerHolding>> IIFLBroker::get_holdings(const BrokerCredent
         h.quantity = o.value("HoldingQuantity").toInt();
         h.avg_price = o.value("BuyPrice").toDouble();
         h.ltp = o.value("Price").toDouble();
+        h.invested_value = h.quantity * h.avg_price;
+        h.current_value = h.quantity * h.ltp;
         h.pnl = (h.ltp - h.avg_price) * h.quantity;
+        h.pnl_pct = (h.invested_value > 0.0) ? (h.pnl / h.invested_value) * 100.0 : 0.0;
         holdings.append(h);
     }
 
@@ -665,6 +682,16 @@ ApiResponse<QVector<BrokerCandle>> IIFLBroker::get_history(const BrokerCredentia
     }
 
     return {true, candles, "", ts};
+}
+
+// ============================================================================
+// Pre-trade margin calculator — fallback estimator.
+// IIFL (XTS) has no margin calculator API (OpenAlgo's broker/iifl/api/margin_api.py
+// raises NotImplementedError), so we use the shared heuristic estimator
+// (BrokerInterface.h::estimate_order_margin).
+// ============================================================================
+ApiResponse<OrderMargin> IIFLBroker::get_order_margins(const BrokerCredentials& /*creds*/, const UnifiedOrder& order) {
+    return {true, estimate_order_margin(order), "", now_ts()};
 }
 
 } // namespace fincept::trading

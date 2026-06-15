@@ -76,6 +76,12 @@ class DockScreenRouter : public QObject {
     /// Find an existing dock widget by screen id, or nullptr.
     ads::CDockWidget* find_dock_widget(const QString& id) const;
 
+    /// Return the materialized screen widget for a route id, or nullptr if the
+    /// screen has not been created yet. This is the raw screen (not the ADS
+    /// dock-widget wrapper), so callers can qobject_cast it to the concrete type
+    /// to hand it a payload after navigate() (e.g. a notebook path to open).
+    QWidget* screen_widget(const QString& id) const { return screens_.value(id); }
+
     /// Returns all registered screen IDs (both eager and factory).
     QStringList all_screen_ids() const;
 
@@ -103,6 +109,30 @@ class DockScreenRouter : public QObject {
     ///   panel 4 → right-of-3 (= bottom-right)
     /// Panels 5+ tab into the bottom-right area.
     void tile_2x2();
+
+    /// Drop every closed/hidden dock widget out of the dock manager so it is
+    /// not serialised into the saved layout. ADS keeps a toggled-off widget in
+    /// its own area in the tree (Closed="1"); CDockManager::saveState() writes
+    /// all of them and restoreState() faithfully rebuilds them, so closed
+    /// panels accumulate across sessions into dozens of zero-size split areas
+    /// that corrupt the restored grid (a clean left|right comes back as a
+    /// reshuffled top/bottom split). Call this immediately before saveState().
+    ///
+    /// The CDockWidget objects survive — the router owns them in dock_widgets_,
+    /// so navigate()/tab_into()/add_alongside() re-add them on demand via their
+    /// needs_add path (triggered by dockManager()==nullptr). Returns the number
+    /// of panels pruned. No-op (returns 0) when nothing is hidden.
+    int prune_hidden_panels();
+
+    /// Synchronously persist the UI state of EVERY materialized stateful screen
+    /// (IStatefulScreen) right now, on the calling thread. Panels that are
+    /// visible at app-quit never receive visibilityChanged(false), so their
+    /// per-screen save never fires through the normal hide path; and an async
+    /// save dispatched from closeEvent would race process exit. WindowFrame
+    /// calls this at the top of closeEvent so each open tab's latest config
+    /// (FNO underlying/expiry/broker, equity symbol/watchlist, active sub-tab,
+    /// …) is on disk before shutdown. Returns the number of screens flushed.
+    int flush_all_screen_states();
 
     /// Phase 5: tear off a panel into a brand-new WindowFrame. Spawns the
     /// new frame on the next available monitor (mirrors the
@@ -178,6 +208,15 @@ class DockScreenRouter : public QObject {
     /// the same path navigate() uses.
     void materialize_now(const QString& id);
 
+    /// Suppress/resume the visibilityChanged→materialize_screen autowire.
+    /// Used by WindowFrame to prevent synchronous screen construction
+    /// during CDockManager::restoreState() — the restore toggles
+    /// dozens of widgets visible, and constructing each screen factory
+    /// inline blocks the first paint for seconds. The caller sets true
+    /// before restoreState, false after, then triggers deferred
+    /// materialization via PanelMaterialiser.
+    void set_suppress_materialize(bool suppress) { suppress_visibility_materialize_ = suppress; }
+
   signals:
     void screen_changed(const QString& id);
 
@@ -219,6 +258,15 @@ class DockScreenRouter : public QObject {
 
     ads::CDockWidget* create_dock_widget(const QString& id);
     void materialize_screen(const QString& id);
+
+    /// Re-tile all open panels into the auto-grid the product wants when a new
+    /// panel is added: 1=full, 2=left|right, 3=top-row + full-width bottom,
+    /// 4=2x2 (3rd→bottom-left, 4th→bottom-right), 5+=tab into bottom-right.
+    /// Existing panels keep their reading order (top→bottom, left→right); if
+    /// `newest` is given it is placed into the last/next slot. Shared by the
+    /// `layout.tile_2x2` command (newest == nullptr) and navigate()'s
+    /// new-panel path.
+    void retile_grid(ads::CDockWidget* newest = nullptr);
 
     // ── Symbol group linking ──────────────────────────────────────────────────
     // If `screen` (or one of its descendants) implements IGroupLinked, wraps

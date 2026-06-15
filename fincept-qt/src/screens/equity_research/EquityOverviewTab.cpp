@@ -7,6 +7,11 @@
 #include <QDateTime>
 #include <QEvent>
 #include <QFrame>
+#include <QCoreApplication>
+#include <QFile>
+#include <QJsonArray>
+#include <QJsonObject>
+#include <QTextStream>
 #include <QHBoxLayout>
 #include <QPainter>
 #include <QScrollArea>
@@ -70,7 +75,7 @@ QLabel* EquityOverviewTab::add_row_(QFrame* panel, const char* key, const char* 
                          .arg(FONT_KEY));
     i18n_labels_.insert(k, key);
 
-    auto* v = new QLabel(QStringLiteral("\xe2\x80\x94"));
+    auto* v = new QLabel(QString::fromUtf8("\xe2\x80\x94"));
     v->setStyleSheet(QString("color:%1;font-size:%2px;font-weight:600;background:transparent;border:0;")
                          .arg(val_color)
                          .arg(FONT_VAL));
@@ -433,9 +438,21 @@ QWidget* EquityOverviewTab::build_chart_panel() {
 
     vl->addLayout(btn_row);
 
-    // Canvas
+    // Chart widget — prefer KLineChart when WebEngine is available
+#ifdef HAS_QT_WEBENGINE
+    kline_chart_ = new fincept::ui::KLineChartWidget;
+    if (kline_chart_->is_available()) {
+        vl->addWidget(kline_chart_, 1);
+    } else {
+        delete kline_chart_;
+        kline_chart_ = nullptr;
+        candle_canvas_ = new ResearchCandleCanvas;
+        vl->addWidget(candle_canvas_, 1);
+    }
+#else
     candle_canvas_ = new ResearchCandleCanvas;
     vl->addWidget(candle_canvas_, 1);
+#endif
 
     return p;
 }
@@ -487,7 +504,7 @@ QWidget* EquityOverviewTab::build_analyst_panel() {
     target_low_val_    = add_row_(p, QT_TR_NOOP("LOW"),      ui::colors::NEGATIVE);
     analyst_count_val_ = add_row_(p, QT_TR_NOOP("ANALYSTS"), CYAN);
 
-    rec_key_label_ = new QLabel(QStringLiteral("\xe2\x80\x94"));
+    rec_key_label_ = new QLabel(QString::fromUtf8("\xe2\x80\x94"));
     rec_key_label_->setAlignment(Qt::AlignCenter);
     rec_key_label_->setStyleSheet(QString("background:%1;color:%2;border-radius:2px;padding:3px 8px;"
                                           "font-size:12px;font-weight:700;")
@@ -547,7 +564,7 @@ QWidget* EquityOverviewTab::build_bottom_row() {
 
 QWidget* EquityOverviewTab::build_company_desc_panel() {
     auto* p = make_panel_(QT_TR_NOOP("COMPANY OVERVIEW"), CYAN);
-    company_desc_ = new QLabel(QStringLiteral("\xe2\x80\x94"));
+    company_desc_ = new QLabel(QString::fromUtf8("\xe2\x80\x94"));
     company_desc_->setWordWrap(true);
     company_desc_->setAlignment(Qt::AlignTop | Qt::AlignLeft);
     company_desc_->setStyleSheet(QString("color:%1;font-size:%2px;line-height:1.5;"
@@ -621,7 +638,7 @@ void EquityOverviewTab::render_info(const services::equity::StockInfo& info) {
         low_val_->setText(fmt_price(cached_quote_.low));
         prev_close_val_->setText(fmt_price(cached_quote_.prev_close));
     }
-    if (historical_loaded_ && !cached_candles_.isEmpty()) {
+    if (historical_loaded_ && !cached_candles_.isEmpty() && candle_canvas_) {
         candle_canvas_->set_candles(cached_candles_,
                                     currency_symbol(current_currency_.isEmpty() ? "USD" : current_currency_));
     }
@@ -674,7 +691,7 @@ void EquityOverviewTab::render_info(const services::equity::StockInfo& info) {
         rec_text = tr("STRONG SELL");
         rec_color = ui::colors::NEGATIVE;
     }
-    rec_key_label_->setText(rec_text.isEmpty() ? QStringLiteral("\xe2\x80\x94") : rec_text);
+    rec_key_label_->setText(rec_text.isEmpty() ? QString::fromUtf8("\xe2\x80\x94") : rec_text);
     rec_key_label_->setStyleSheet(QString("background:%1;color:%2;border-radius:2px;padding:3px 8px;"
                                           "font-size:12px;font-weight:700;")
                                       .arg(ui::colors::BG_RAISED(), rec_color));
@@ -713,6 +730,23 @@ void EquityOverviewTab::on_historical_loaded(QString symbol, QVector<services::e
 }
 
 void EquityOverviewTab::rebuild_chart(const QVector<services::equity::Candle>& candles) {
+#ifdef HAS_QT_WEBENGINE
+    if (kline_chart_) {
+        QJsonArray arr;
+        for (const auto& c : candles) {
+            QJsonObject obj;
+            obj[QStringLiteral("timestamp")] = static_cast<double>(c.timestamp);
+            obj[QStringLiteral("open")] = c.open;
+            obj[QStringLiteral("high")] = c.high;
+            obj[QStringLiteral("low")] = c.low;
+            obj[QStringLiteral("close")] = c.close;
+            obj[QStringLiteral("volume")] = static_cast<double>(c.volume);
+            arr.append(obj);
+        }
+        kline_chart_->set_candles(arr);
+        return;
+    }
+#endif
     const QString cs = currency_symbol(current_currency_.isEmpty() ? "USD" : current_currency_);
     candle_canvas_->set_candles(candles, cs);
 }
@@ -792,7 +826,7 @@ QString EquityOverviewTab::currency_symbol(const QString& currency_code) {
 
 QString EquityOverviewTab::fmt_price(double v) const {
     if (v == 0.0)
-        return QStringLiteral("\xe2\x80\x94");
+        return QString::fromUtf8("\xe2\x80\x94");
     const QString sym = current_currency_.isEmpty() ? "$" : currency_symbol(current_currency_);
     return QString("%1%2").arg(sym).arg(v, 0, 'f', 2);
 }

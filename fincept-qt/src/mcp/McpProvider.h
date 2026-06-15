@@ -43,9 +43,31 @@ class McpProvider {
 
     /// O(1) lookup of a single tool's UnifiedTool snapshot by canonical name.
     /// Returns `std::nullopt` if the name is unknown or disabled. Used by
-    /// tool.describe so the hot tool-pick path doesn't pay the O(N) cost of
+    /// tool_describe so the hot tool-pick path doesn't pay the O(N) cost of
     /// list_tools()+linear-scan (was ~3 ms p95 across the 583-tool catalog).
     std::optional<UnifiedTool> find_tool(const QString& name) const;
+
+    /// Audit-friendly snapshot of one tool. Carries the bits the self-test /
+    /// management UI need to verify wiring — crucially handler-presence, which
+    /// the LLM-facing UnifiedTool snapshot omits. Does not expose the handler
+    /// std::functions themselves (kept inside the registry).
+    struct ToolAuditInfo {
+        QString name;
+        QString category;
+        QString description;
+        bool has_handler = false;   // sync OR async handler is set
+        bool is_async = false;      // async_handler is set
+        bool enabled = true;
+        bool is_destructive = false;
+        AuthLevel auth_required = AuthLevel::None;
+        QJsonObject input_schema;   // serialised JSON Schema
+        QStringList legacy_aliases;
+    };
+
+    /// One ToolAuditInfo per registered tool (enabled and disabled). Used by
+    /// the headless tool self-test to verify every tool has a handler, a valid
+    /// schema, and a usable description without invoking anything.
+    std::vector<ToolAuditInfo> audit_all_tools() const;
 
     // ── Tool Execution ─────────────────────────────────────────────────────
 

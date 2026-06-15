@@ -181,8 +181,8 @@ void EconomicsScreen::build_ui() {
     hl->setContentsMargins(12, 0, 12, 0);
     hl->setSpacing(8);
 
-    title_ = new QLabel("ECONOMICS DATA EXPLORER");
-    subtitle_ = new QLabel("32 global data sources · 1000+ indicators");
+    title_ = new QLabel(tr("ECONOMICS DATA EXPLORER"));
+    subtitle_ = new QLabel(tr("32 global data sources · 1000+ indicators"));
 
     hl->addWidget(title_);
     hl->addWidget(subtitle_);
@@ -268,6 +268,22 @@ void EconomicsScreen::refresh_theme() {
     stack_->setStyleSheet(QString("background:%1;").arg(BG_BASE()));
 }
 
+// ── i18n ──────────────────────────────────────────────────────────────────────
+
+void EconomicsScreen::changeEvent(QEvent* event) {
+    if (event->type() == QEvent::LanguageChange)
+        retranslateUi();
+    QWidget::changeEvent(event);
+}
+
+void EconomicsScreen::retranslateUi() {
+    if (title_)
+        title_->setText(tr("ECONOMICS DATA EXPLORER"));
+    if (subtitle_)
+        subtitle_->setText(tr("32 global data sources · 1000+ indicators"));
+    // Source badge labels are brand/source names (data) and are not translated.
+}
+
 // ── Panel switching ───────────────────────────────────────────────────────────
 
 EconPanelBase* EconomicsScreen::get_or_create_panel(SourceEntry& entry) {
@@ -309,13 +325,26 @@ void EconomicsScreen::switch_to(const QString& source_id) {
 // ── IStatefulScreen ───────────────────────────────────────────────────────────
 
 QVariantMap EconomicsScreen::save_state() const {
-    return {{"source_id", active_id_}};
+    QVariantMap state{{"source_id", active_id_}};
+    for (const auto& entry : sources_) {
+        if (entry.panel) {
+            auto ps = entry.panel->save_panel_state();
+            if (!ps.isEmpty())
+                state[entry.id + "_panel"] = ps;
+        }
+    }
+    return state;
 }
 
 void EconomicsScreen::restore_state(const QVariantMap& state) {
     const QString id = state.value("source_id").toString();
     if (!id.isEmpty())
         switch_to(id);
+    for (auto& entry : sources_) {
+        const QString key = entry.id + "_panel";
+        if (entry.panel && state.contains(key))
+            entry.panel->restore_panel_state(state.value(key).toMap());
+    }
 }
 
 } // namespace fincept::screens

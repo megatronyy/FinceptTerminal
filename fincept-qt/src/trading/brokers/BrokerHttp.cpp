@@ -4,6 +4,7 @@
 
 #include "core/logging/Logger.h"
 
+#include <QElapsedTimer>
 #include <QEventLoop>
 #include <QNetworkAccessManager>
 #include <QNetworkReply>
@@ -98,6 +99,11 @@ BrokerHttpResponse BrokerHttp::put_raw(const QString& url, const QByteArray& bod
     return execute("PUT", url, body, ct, h);
 }
 
+BrokerHttpResponse BrokerHttp::send(const QString& method, const QString& url, const QByteArray& body,
+                                    const QString& content_type, const QMap<QString, QString>& headers) {
+    return execute(method, url, body, content_type, headers);
+}
+
 BrokerHttpResponse BrokerHttp::execute(const QString& method, const QString& url, const QByteArray& body,
                                        const QString& content_type, const QMap<QString, QString>& headers) {
     // One QNetworkAccessManager per worker thread so TLS/TCP connections are
@@ -130,7 +136,13 @@ BrokerHttpResponse BrokerHttp::execute(const QString& method, const QString& url
     // Send request
     QNetworkReply* reply = nullptr;
     if (method == "GET") {
-        reply = nam.get(req);
+        // Some broker REST APIs (e.g. ICICI Breeze) send a JSON body on GET.
+        // QNetworkAccessManager::get() can't carry a body, so fall back to a
+        // custom request when one is present. Empty-body GET keeps the fast path.
+        if (body.isEmpty())
+            reply = nam.get(req);
+        else
+            reply = nam.sendCustomRequest(req, "GET", body);
     } else if (method == "POST") {
         reply = nam.post(req, body);
     } else if (method == "PUT") {
@@ -149,16 +161,22 @@ BrokerHttpResponse BrokerHttp::execute(const QString& method, const QString& url
         return {false, 0, {}, "", "Failed to create network request"};
     }
 
-    // Block until finished (with timeout)
+    // Block until finished (with timeout). Measure the actual network round-trip
+    // by bracketing only the event-loop wait — this excludes request setup and
+    // JSON parsing so rtt_ms is comparable to what Postman/Bruno report.
     QEventLoop loop;
     QTimer timer;
     timer.setSingleShot(true);
     QObject::connect(reply, &QNetworkReply::finished, &loop, &QEventLoop::quit);
     QObject::connect(&timer, &QTimer::timeout, &loop, &QEventLoop::quit);
+    QElapsedTimer rtt;
+    rtt.start();
     timer.start(timeout_ms_);
     loop.exec();
+    const double elapsed_ms = static_cast<double>(rtt.nsecsElapsed()) / 1e6;
 
     BrokerHttpResponse result;
+    result.rtt_ms = elapsed_ms;
 
     if (timer.isActive()) {
         timer.stop();
@@ -166,7 +184,10 @@ BrokerHttpResponse BrokerHttp::execute(const QString& method, const QString& url
         // Timeout
         reply->abort();
         reply->deleteLater();
-        return {false, 0, {}, "", "Request timed out"};
+        BrokerHttpResponse timeout_result;
+        timeout_result.error = "Request timed out";
+        timeout_result.rtt_ms = elapsed_ms;
+        return timeout_result;
     }
 
     result.status_code = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();

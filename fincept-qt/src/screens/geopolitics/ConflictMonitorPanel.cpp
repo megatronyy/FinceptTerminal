@@ -5,6 +5,7 @@
 #include "ui/theme/Theme.h"
 #include "ui/widgets/WorldMapWidget.h"
 
+#include <QComboBox>
 #include <QDesktopServices>
 #include <QGridLayout>
 #include <QHBoxLayout>
@@ -34,9 +35,77 @@ void ConflictMonitorPanel::build_ui() {
     left_splitter->setStyleSheet(QString("QSplitter::handle { background:%1; }").arg(ui::colors::BORDER_DIM()));
 
     // ── World Map ───────────────────────────────────────────────────────────
-    map_widget_ = new fincept::ui::WorldMapWidget(left_splitter);
+    // Wrap the map in a container with a slim toolbar carrying the BASEMAP
+    // selector, then add the container (not the bare map) to the splitter.
+    auto* map_container = new QWidget(left_splitter);
+    auto* mc_vl = new QVBoxLayout(map_container);
+    mc_vl->setContentsMargins(0, 0, 0, 0);
+    mc_vl->setSpacing(0);
+
+    auto* map_toolbar = new QWidget(map_container);
+    map_toolbar->setObjectName("gpMapToolbar");
+    map_toolbar->setFixedHeight(32);
+    map_toolbar->setStyleSheet(QString("#gpMapToolbar { background:%1; border-bottom:1px solid %2; }")
+                                   .arg(ui::colors::BG_RAISED(), ui::colors::BORDER_MED()));
+    auto* mt_hl = new QHBoxLayout(map_toolbar);
+    mt_hl->setContentsMargins(10, 0, 10, 0);
+    mt_hl->setSpacing(8);
+
+    auto* map_accent = new QLabel(map_toolbar);
+    map_accent->setFixedSize(3, 12);
+    map_accent->setStyleSheet(QString("background:%1; border-radius:1px;").arg(ui::colors::AMBER()));
+    mt_hl->addWidget(map_accent);
+
+    auto* map_title = new QLabel(tr("CONFLICT MAP"), map_toolbar);
+    map_title->setStyleSheet(QString("color:%1; font-size:11px; font-weight:700; font-family:%2; letter-spacing:1px;")
+                                 .arg(ui::colors::AMBER())
+                                 .arg(ui::fonts::DATA_FAMILY));
+    mt_hl->addWidget(map_title);
+    mt_hl->addStretch();
+
+    auto* basemap_cap = new QLabel(tr("BASEMAP"), map_toolbar);
+    basemap_cap->setStyleSheet(QString("color:%1; font-size:8px; font-weight:700; font-family:%2; letter-spacing:1px;")
+                                   .arg(ui::colors::TEXT_TERTIARY())
+                                   .arg(ui::fonts::DATA_FAMILY));
+    mt_hl->addWidget(basemap_cap);
+
+    map_type_combo_ = new QComboBox(map_toolbar);
+    map_type_combo_->setCursor(Qt::PointingHandCursor);
+    map_type_combo_->setFixedWidth(132);
+    map_type_combo_->setStyleSheet(
+        QString("QComboBox { background:%1; color:%2; border:1px solid %3; border-radius:2px;"
+                "font-family:%6; font-size:%7px; font-weight:700; padding:3px 8px; }"
+                "QComboBox:hover, QComboBox:focus { border-color:%4; }"
+                "QComboBox::drop-down { border:none; width:16px; }"
+                "QComboBox::down-arrow { image:none; width:0; height:0;"
+                "border-left:3px solid transparent; border-right:3px solid transparent;"
+                "border-top:4px solid %4; margin-right:6px; }"
+                "QComboBox QAbstractItemView { background:%1; color:%2; border:1px solid %3;"
+                "selection-background-color:%5; selection-color:%4; outline:0;"
+                "font-family:%6; font-size:%7px; }")
+            .arg(ui::colors::BG_RAISED(), ui::colors::TEXT_PRIMARY(), ui::colors::BORDER_MED(),
+                 ui::colors::AMBER(), ui::colors::BG_HOVER())
+            .arg(ui::fonts::DATA_FAMILY)
+            .arg(ui::fonts::SMALL));
+    mt_hl->addWidget(map_type_combo_);
+
+    mc_vl->addWidget(map_toolbar);
+
+    map_widget_ = new fincept::ui::WorldMapWidget(map_container);
     map_widget_->setMinimumHeight(280);
-    left_splitter->addWidget(map_widget_);
+    mc_vl->addWidget(map_widget_, 1);
+
+    left_splitter->addWidget(map_container);
+
+    // Default geopolitics to the DARK political basemap (index 1) — preserves
+    // the screen's prior look; the selector lets the user pick satellite, etc.
+    map_type_combo_->addItems(fincept::ui::WorldMapWidget::basemap_labels());
+    map_type_combo_->setCurrentIndex(1);  // 1 = DARK in basemap_labels()
+    map_widget_->set_basemap(1);
+    connect(map_type_combo_, &QComboBox::currentIndexChanged, this, [this](int idx) {
+        if (map_widget_)
+            map_widget_->set_basemap(idx);
+    });
 
     // Map pin click → select the matching row in the events table. The row's
     // currentCellChanged handler (wired below) then fills the detail panel,
@@ -57,7 +126,8 @@ void ConflictMonitorPanel::build_ui() {
     // ── Events Table ────────────────────────────────────────────────────────
     events_table_ = new QTableWidget(left_splitter);
     events_table_->setColumnCount(7);
-    events_table_->setHorizontalHeaderLabels({"Category", "Country", "City", "Title", "Date", "Lat", "Lng"});
+    events_table_->setHorizontalHeaderLabels(
+        {tr("Category"), tr("Country"), tr("City"), tr("Title"), tr("Date"), tr("Lat"), tr("Lng")});
     events_table_->setEditTriggers(QAbstractItemView::NoEditTriggers);
     events_table_->setSelectionBehavior(QAbstractItemView::SelectRows);
     events_table_->setAlternatingRowColors(true);
@@ -107,7 +177,7 @@ void ConflictMonitorPanel::build_ui() {
 
         const QString title = get_text(3);
         if (detail_title_)
-            detail_title_->setText(title.isEmpty() ? QStringLiteral("Untitled event") : title);
+            detail_title_->setText(title.isEmpty() ? tr("Untitled event") : title);
         detail_category_->setText(get_text(0).toUpper());
         detail_country_->setText(get_text(1).isEmpty() ? QStringLiteral("—") : get_text(1));
         detail_city_->setText(get_text(2).isEmpty() ? QStringLiteral("—") : get_text(2));
@@ -250,15 +320,29 @@ QWidget* ConflictMonitorPanel::build_overview_section(QWidget* parent) {
     vl->setContentsMargins(0, 0, 0, 0);
     vl->setSpacing(8);
 
-    vl->addWidget(make_section_header("OVERVIEW", w));
+    auto* hdr = make_section_header(tr("OVERVIEW"), w);
+    hdr_overview_ = qobject_cast<QLabel*>(hdr);
+    vl->addWidget(hdr);
 
     auto* tiles = new QWidget(w);
     auto* tl = new QHBoxLayout(tiles);
     tl->setContentsMargins(0, 0, 0, 0);
     tl->setSpacing(6);
-    tl->addWidget(make_stat_tile("EVENTS", &stat_total_, tiles), 1);
-    tl->addWidget(make_stat_tile("MAPPED", &stat_mapped_, tiles), 1);
-    tl->addWidget(make_stat_tile("NATIONS", &stat_countries_, tiles), 1);
+    auto* tile_events = make_stat_tile(tr("EVENTS"), &stat_total_, tiles);
+    auto* tile_mapped = make_stat_tile(tr("MAPPED"), &stat_mapped_, tiles);
+    auto* tile_nations = make_stat_tile(tr("NATIONS"), &stat_countries_, tiles);
+    // Capture each tile's caption label (last direct-child QLabel) for retranslate.
+    {
+        auto labels = tile_events->findChildren<QLabel*>(QString(), Qt::FindDirectChildrenOnly);
+        if (!labels.isEmpty()) tile_events_lbl_ = labels.last();
+        labels = tile_mapped->findChildren<QLabel*>(QString(), Qt::FindDirectChildrenOnly);
+        if (!labels.isEmpty()) tile_mapped_lbl_ = labels.last();
+        labels = tile_nations->findChildren<QLabel*>(QString(), Qt::FindDirectChildrenOnly);
+        if (!labels.isEmpty()) tile_nations_lbl_ = labels.last();
+    }
+    tl->addWidget(tile_events, 1);
+    tl->addWidget(tile_mapped, 1);
+    tl->addWidget(tile_nations, 1);
     vl->addWidget(tiles);
     return w;
 }
@@ -268,7 +352,9 @@ QWidget* ConflictMonitorPanel::build_top_categories_section(QWidget* parent) {
     auto* vl = new QVBoxLayout(w);
     vl->setContentsMargins(0, 0, 0, 0);
     vl->setSpacing(6);
-    vl->addWidget(make_section_header("TOP CATEGORIES", w));
+    auto* hdr = make_section_header(tr("TOP CATEGORIES"), w);
+    hdr_top_categories_ = qobject_cast<QLabel*>(hdr);
+    vl->addWidget(hdr);
 
     auto* container = new QWidget(w);
     stats_layout_ = new QVBoxLayout(container);
@@ -276,7 +362,9 @@ QWidget* ConflictMonitorPanel::build_top_categories_section(QWidget* parent) {
     stats_layout_->setSpacing(6);
     vl->addWidget(container);
 
-    auto* empty = new QLabel("Waiting for events…", w);
+    // Transient empty-state — replaced by update_stats() once data arrives, so
+    // it is not cached for retranslate (would dangle after the layout is cleared).
+    auto* empty = new QLabel(tr("Waiting for events…"), w);
     empty->setObjectName("topcat_empty");
     empty->setStyleSheet(QString("color:%1; font-size:%2px; font-family:%3; font-style:italic;")
                              .arg(ui::colors::TEXT_TERTIARY())
@@ -291,7 +379,9 @@ QWidget* ConflictMonitorPanel::build_hotspots_section(QWidget* parent) {
     auto* vl = new QVBoxLayout(w);
     vl->setContentsMargins(0, 0, 0, 0);
     vl->setSpacing(6);
-    vl->addWidget(make_section_header("HOTSPOTS", w));
+    auto* hdr = make_section_header(tr("HOTSPOTS"), w);
+    hdr_hotspots_ = qobject_cast<QLabel*>(hdr);
+    vl->addWidget(hdr);
 
     auto* container = new QWidget(w);
     hotspots_layout_ = new QVBoxLayout(container);
@@ -299,7 +389,8 @@ QWidget* ConflictMonitorPanel::build_hotspots_section(QWidget* parent) {
     hotspots_layout_->setSpacing(5);
     vl->addWidget(container);
 
-    auto* empty = new QLabel("Waiting for events…", w);
+    // Transient empty-state (replaced by update_hotspots) — not cached.
+    auto* empty = new QLabel(tr("Waiting for events…"), w);
     empty->setStyleSheet(QString("color:%1; font-size:%2px; font-family:%3; font-style:italic;")
                              .arg(ui::colors::TEXT_TERTIARY())
                              .arg(ui::fonts::SMALL)
@@ -313,10 +404,12 @@ QWidget* ConflictMonitorPanel::build_event_details_section(QWidget* parent) {
     auto* vl = new QVBoxLayout(w);
     vl->setContentsMargins(0, 0, 0, 0);
     vl->setSpacing(8);
-    vl->addWidget(make_section_header("EVENT DETAILS", w));
+    auto* hdr = make_section_header(tr("EVENT DETAILS"), w);
+    hdr_event_details_ = qobject_cast<QLabel*>(hdr);
+    vl->addWidget(hdr);
 
     // Empty-state placeholder
-    empty_state_ = new QLabel(QStringLiteral("⌖  Select an event from the map or table\n    to inspect details here."), w);
+    empty_state_ = new QLabel(tr("⌖  Select an event from the map or table\n    to inspect details here."), w);
     empty_state_->setWordWrap(true);
     empty_state_->setAlignment(Qt::AlignLeft | Qt::AlignVCenter);
     empty_state_->setStyleSheet(QString("color:%1; font-size:%2px; font-family:%3;"
@@ -385,17 +478,18 @@ QWidget* ConflictMonitorPanel::build_event_details_section(QWidget* parent) {
     fg->setColumnStretch(1, 1);
 
     struct FieldDef {
-        const char* label;
-        QLabel** target;
+        QString label;
+        QLabel** target;       // value label
+        QLabel** label_target; // caption label (cached for retranslate)
         int row;
         int col;
         int colspan;
     };
     FieldDef fields[] = {
-        {"COUNTRY", &detail_country_, 0, 0, 1},
-        {"CITY",    &detail_city_,    0, 1, 1},
-        {"DATE",    &detail_date_,    1, 0, 1},
-        {"SOURCE",  &detail_source_,  1, 1, 1},
+        {tr("COUNTRY"), &detail_country_, &field_country_lbl_, 0, 0, 1},
+        {tr("CITY"),    &detail_city_,    &field_city_lbl_,    0, 1, 1},
+        {tr("DATE"),    &detail_date_,    &field_date_lbl_,    1, 0, 1},
+        {tr("SOURCE"),  &detail_source_,  &field_source_lbl_,  1, 1, 1},
     };
 
     for (const auto& f : fields) {
@@ -408,6 +502,7 @@ QWidget* ConflictMonitorPanel::build_event_details_section(QWidget* parent) {
         auto* l = new QLabel(f.label, cell);
         l->setStyleSheet(field_label_style);
         cl->addWidget(l);
+        if (f.label_target) *f.label_target = l;
 
         *f.target = new QLabel(QStringLiteral("—"), cell);
         (*f.target)->setStyleSheet(value_style);
@@ -419,7 +514,7 @@ QWidget* ConflictMonitorPanel::build_event_details_section(QWidget* parent) {
     dvl->addWidget(fields_grid_w);
 
     // Open-source button
-    detail_open_btn_ = new QPushButton(QStringLiteral("OPEN SOURCE  ↗"), detail_panel_);
+    detail_open_btn_ = new QPushButton(tr("OPEN SOURCE  ↗"), detail_panel_);
     detail_open_btn_->setCursor(Qt::PointingHandCursor);
     detail_open_btn_->setVisible(false);
     {
@@ -558,7 +653,7 @@ void ConflictMonitorPanel::update_stats(const QVector<NewsEvent>& events) {
     std::sort(sorted.begin(), sorted.end(), [](const auto& a, const auto& b) { return a.second > b.second; });
 
     if (sorted.isEmpty()) {
-        auto* empty = new QLabel("No events match the current filters.", this);
+        auto* empty = new QLabel(tr("No events match the current filters."), this);
         empty->setStyleSheet(QString("color:%1; font-size:%2px; font-family:%3; font-style:italic;")
                                  .arg(ui::colors::TEXT_TERTIARY())
                                  .arg(ui::fonts::SMALL)
@@ -650,7 +745,7 @@ void ConflictMonitorPanel::update_hotspots(const QVector<NewsEvent>& events) {
     std::sort(sorted.begin(), sorted.end(), [](const auto& a, const auto& b) { return a.second > b.second; });
 
     if (sorted.isEmpty()) {
-        auto* empty = new QLabel("No country data.", this);
+        auto* empty = new QLabel(tr("No country data."), this);
         empty->setStyleSheet(QString("color:%1; font-size:%2px; font-family:%3; font-style:italic;")
                                  .arg(ui::colors::TEXT_TERTIARY())
                                  .arg(ui::fonts::SMALL)
@@ -721,6 +816,41 @@ void ConflictMonitorPanel::update_hotspots(const QVector<NewsEvent>& events) {
 
         hotspots_layout_->addWidget(row);
     }
+}
+
+void ConflictMonitorPanel::changeEvent(QEvent* event) {
+    if (event->type() == QEvent::LanguageChange)
+        retranslateUi();
+    QWidget::changeEvent(event);
+}
+
+void ConflictMonitorPanel::retranslateUi() {
+    // Table headers
+    if (events_table_)
+        events_table_->setHorizontalHeaderLabels(
+            {tr("Category"), tr("Country"), tr("City"), tr("Title"), tr("Date"), tr("Lat"), tr("Lng")});
+
+    // Section headers
+    if (hdr_overview_)       hdr_overview_->setText(tr("OVERVIEW"));
+    if (hdr_top_categories_) hdr_top_categories_->setText(tr("TOP CATEGORIES"));
+    if (hdr_hotspots_)       hdr_hotspots_->setText(tr("HOTSPOTS"));
+    if (hdr_event_details_)  hdr_event_details_->setText(tr("EVENT DETAILS"));
+
+    // Overview tile captions
+    if (tile_events_lbl_)  tile_events_lbl_->setText(tr("EVENTS"));
+    if (tile_mapped_lbl_)  tile_mapped_lbl_->setText(tr("MAPPED"));
+    if (tile_nations_lbl_) tile_nations_lbl_->setText(tr("NATIONS"));
+
+    // Detail field captions
+    if (field_country_lbl_) field_country_lbl_->setText(tr("COUNTRY"));
+    if (field_city_lbl_)    field_city_lbl_->setText(tr("CITY"));
+    if (field_date_lbl_)    field_date_lbl_->setText(tr("DATE"));
+    if (field_source_lbl_)  field_source_lbl_->setText(tr("SOURCE"));
+
+    // Static placeholders / actions
+    if (empty_state_)
+        empty_state_->setText(tr("⌖  Select an event from the map or table\n    to inspect details here."));
+    if (detail_open_btn_) detail_open_btn_->setText(tr("OPEN SOURCE  ↗"));
 }
 
 } // namespace fincept::screens

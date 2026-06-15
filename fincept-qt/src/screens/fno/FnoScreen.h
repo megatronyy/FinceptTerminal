@@ -18,6 +18,7 @@
 #include "core/symbol/IGroupLinked.h"
 #include "screens/common/IStatefulScreen.h"
 
+#include <QEvent>
 #include <QHash>
 #include <QPointer>
 #include <QPushButton>
@@ -27,6 +28,10 @@
 #include <QWidget>
 
 #include <functional>
+
+namespace fincept::screens::common {
+class PaperBlotterPanel;
+}
 
 namespace fincept::screens::fno {
 
@@ -56,6 +61,7 @@ class FnoScreen : public QWidget,
   protected:
     void showEvent(QShowEvent* e) override;
     void hideEvent(QHideEvent* e) override;
+    void changeEvent(QEvent* event) override;
 
   public:
     enum SubTab : int {
@@ -65,6 +71,7 @@ class FnoScreen : public QWidget,
         TabMultiStraddle = 3,
         TabFiiDii = 4,
         TabScreener = 5,
+        TabPositions = 6,
         TabCount
     };
 
@@ -75,6 +82,13 @@ class FnoScreen : public QWidget,
     void setup_ui();
     QWidget* build_tab_bar();
     QWidget* build_placeholder(const QString& tab_name, const QString& detail);
+
+    /// Re-apply tr() lookups to the tab-bar buttons on QEvent::LanguageChange.
+    void retranslateUi();
+
+    /// Translated tab label / detail for the given slot index.
+    static QString tab_label_for(int index);
+    static QString tab_detail_for(int index);
 
     /// Lazy-construct the requested sub-tab and insert it into the stack at
     /// its slot index. No-op if already present.
@@ -96,6 +110,7 @@ class FnoScreen : public QWidget,
     QPointer<class FiiDiiSubTab> fii_dii_tab_;
     QPointer<class MultiStraddleSubTab> multi_straddle_tab_;
     QPointer<class ScreenerSubTab> screener_tab_;
+    QPointer<fincept::screens::common::PaperBlotterPanel> positions_tab_;
 
     // Group G is the "yellow" slot in the default palette (per SymbolGroup.h
     // line 16). Plan called for Yellow as the F&O default — that's slot G.

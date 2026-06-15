@@ -206,6 +206,10 @@ void ExchangeService::set_ws_primary_symbol(const QString& symbol) {
     active_session()->set_ws_primary_symbol(symbol);
 }
 
+void ExchangeService::set_ws_timeframe(const QString& timeframe) {
+    active_session()->set_ws_timeframe(timeframe);
+}
+
 QString ExchangeService::get_ws_primary_symbol() const {
     return active_session()->get_ws_primary_symbol();
 }
@@ -262,8 +266,9 @@ QJsonObject ExchangeService::fetch_balance() {
     return active_session()->fetch_balance();
 }
 QJsonObject ExchangeService::place_exchange_order(const QString& symbol, const QString& side, const QString& type,
-                                                  double amount, double price) {
-    return active_session()->place_exchange_order(symbol, side, type, amount, price);
+                                                  double amount, double price, double stop_price, double sl, double tp,
+                                                  bool reduce_only) {
+    return active_session()->place_exchange_order(symbol, side, type, amount, price, stop_price, sl, tp, reduce_only);
 }
 QJsonObject ExchangeService::cancel_exchange_order(const QString& order_id, const QString& symbol) {
     return active_session()->cancel_exchange_order(order_id, symbol);

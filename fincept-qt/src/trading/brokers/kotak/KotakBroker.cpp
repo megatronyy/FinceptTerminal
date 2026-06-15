@@ -25,6 +25,7 @@
 
 #include "core/logging/Logger.h"
 #include "trading/brokers/BrokerHttp.h"
+#include "trading/brokers/BrokerTokenUtil.h"
 #include "trading/instruments/InstrumentService.h"
 
 #include <QCryptographicHash>
@@ -359,8 +360,25 @@ TokenExchangeResponse KotakBroker::exchange_token(const QString& api_key, const 
     const QString packed = trading_token + ":::" + trading_sid + ":::" + base_url + ":::" + access_token_portal +
                            ":::" + server_id;
 
+    // Persist the TOTP secret (auth_code) so the daily trading session can be
+    // silently re-minted: Step1+Step2 re-run from the stored portal token, MPIN
+    // and TOTP secret. Token lapses at the daily reset.
+    QJsonObject extra_obj{{"totp_secret", auth_code.trimmed()}};
+    const QString extra =
+        with_token_expiry(QString::fromUtf8(QJsonDocument(extra_obj).toJson(QJsonDocument::Compact)),
+                          next_ist_flush_epoch(6, 0));
     LOG_INFO(TAG, "Kotak auth complete, ucc=" + ucc + " base_url=" + base_url + " sId=" + server_id);
-    return {true, packed, /*refresh*/ "", ucc, /*additional*/ "", ""};
+    return {true, packed, /*refresh*/ "", ucc, /*additional*/ extra, ""};
+}
+
+// Silent refresh = replay the TOTP login (Step1) + MPIN validation (Step2) from
+// the stored packed api_key (portal token|||mobile|||UCC), MPIN and TOTP secret.
+TokenExchangeResponse KotakBroker::refresh_session(const BrokerCredentials& creds) {
+    const auto extra = QJsonDocument::fromJson(creds.additional_data.toUtf8()).object();
+    const QString totp_secret = extra.value("totp_secret").toString();
+    if (creds.api_key.isEmpty() || creds.api_secret.isEmpty() || totp_secret.isEmpty())
+        return {false, "", "", "", "", "Kotak silent refresh requires stored portal token, MPIN and TOTP secret"};
+    return exchange_token(creds.api_key, creds.api_secret, totp_secret);
 }
 
 // ── Place Order ───────────────────────────────────────────────────────────────
@@ -562,11 +580,19 @@ ApiResponse<QVector<BrokerPosition>> KotakBroker::get_positions(const BrokerCred
         pos.product_type = o.value("prod").toString();
         pos.quantity = net_qty;
         pos.avg_price = buy_qty > 0 ? buy_amt / buy_qty : 0.0;
+        // Net-short (sold more than bought; buy_qty may be 0) has no buy leg to
+        // derive an entry price from — fall back to the sell leg so avg_price and
+        // pnl_pct are meaningful instead of 0.
+        if (net_qty < 0)
+            pos.avg_price = sell_qty > 0 ? sell_amt / sell_qty : pos.avg_price;
         pos.ltp = o.value("ltp").toString().toDouble();
         pos.pnl = (pos.ltp * net_qty) - (buy_amt - sell_amt);
         pos.side = net_qty > 0 ? "LONG" : "SHORT";
-        if (pos.avg_price > 0)
-            pos.pnl_pct = (pos.ltp - pos.avg_price) / pos.avg_price * 100.0;
+        // ltp is populated from the positions response above. Sign the % by side so
+        // a short shows a gain when price falls below the (sell-leg) entry price.
+        pos.pnl_pct = (pos.avg_price > 0.0)
+                          ? ((pos.ltp - pos.avg_price) / pos.avg_price) * 100.0 * (net_qty < 0 ? -1.0 : 1.0)
+                          : 0.0;
         positions.append(pos);
     }
     return {true, positions, "", ts};
@@ -742,7 +768,69 @@ ApiResponse<QVector<BrokerCandle>> KotakBroker::get_history(const BrokerCredenti
                                                             const QString& /*from_date*/, const QString& /*to_date*/) {
     int64_t ts = now_ts();
     LOG_WARN(TAG, "get_history called — Kotak Neo does not support historical data");
-    return {true, QVector<BrokerCandle>{}, "", ts};
+    // Kotak Neo exposes no historical/candle REST endpoint (confirmed by Kotak's
+    // own support docs and the official Neo SDK). Return empty-but-successful with
+    // an explanatory message so charts render a graceful "no data" state.
+    return {true, QVector<BrokerCandle>{}, "Kotak Neo does not provide a historical data API", ts};
+}
+
+// ============================================================================
+// Pre-trade margin calculator — POST {base_url}/quick/user/check-margin (native)
+// Mirrors OpenAlgo broker/kotak/api/margin_api.py + mapping/margin_data.py.
+// Body: jData=<url-encoded JSON>, single position object with Kotak short keys:
+//   {brkName:"KOTAK", brnchId:"ONLINE", exSeg, prc, prcTp, prod, qty, tok, trnsTp}
+// Response: {stat:"Ok", reqdMrgn, avlMrgn, ordMrgn, ...}
+// Kotak returns total required margin only (no SPAN/Exposure breakdown).
+// ============================================================================
+ApiResponse<OrderMargin> KotakBroker::get_order_margins(const BrokerCredentials& creds, const UnifiedOrder& order) {
+    int64_t ts = now_ts();
+    auto p = unpack(creds.access_token);
+    if (!p.valid)
+        return {false, std::nullopt, "[TOKEN_EXPIRED] Invalid or missing session token", ts};
+
+    const QString tok = lookup_psymbol(order.symbol, order.exchange, creds.broker_id);
+    if (tok.isEmpty())
+        return {false, std::nullopt, "Token not found for " + order.exchange + ":" + order.symbol, ts};
+
+    QJsonObject jobj;
+    jobj["brkName"] = "KOTAK";
+    jobj["brnchId"] = "ONLINE";
+    jobj["exSeg"] = kotak_exchange(order.exchange);
+    jobj["prc"] = QString::number(order.price, 'f', 2);
+    jobj["prcTp"] = kotak_enum_map().order_type_or(order.order_type, "MKT");
+    jobj["prod"] = kotak_enum_map().product_or(order.product_type, "MIS");
+    jobj["qty"] = QString::number(static_cast<int>(order.quantity));
+    jobj["tok"] = tok;
+    jobj["trnsTp"] = order.side == OrderSide::Buy ? "B" : "S";
+
+    // check-margin uses the v1-era jData=<url-encoded JSON> form wrapper.
+    const QByteArray json = QJsonDocument(jobj).toJson(QJsonDocument::Compact);
+    QMap<QString, QString> form{{"jData", QString::fromUtf8(json)}};
+
+    auto hdrs = auth_headers(creds);
+    auto resp = BrokerHttp::instance().post_form(with_sid("/quick/user/check-margin", p), form, hdrs);
+
+    if (!resp.success)
+        return {false, std::nullopt, checked_error(resp, "Network error"), ts};
+    if (is_token_expired(resp))
+        return {false, std::nullopt, "[TOKEN_EXPIRED]", ts};
+    if (resp.json.value("stat").toString() != "Ok")
+        return {false, std::nullopt, checked_error(resp, "Margin calculation failed"), ts};
+
+    const auto& j = resp.json;
+    OrderMargin m;
+    m.symbol = order.symbol;
+    m.exchange = order.exchange;
+    m.side = order.side == OrderSide::Buy ? "BUY" : "SELL";
+    m.quantity = order.quantity;
+    m.price = order.price;
+    // Kotak returns string-or-number fields; toVariant().toDouble() handles both.
+    m.total = j.value("reqdMrgn").toVariant().toDouble();
+    m.cash = j.value("avlMrgn").toVariant().toDouble();
+    const double notional = order.price * order.quantity;
+    if (m.total > 0.0 && notional > 0.0)
+        m.leverage = notional / m.total;
+    return {true, m, "", ts};
 }
 
 } // namespace fincept::trading

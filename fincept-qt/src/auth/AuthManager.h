@@ -18,8 +18,22 @@ class AuthManager : public QObject {
     bool is_authenticated() const { return session_.authenticated; }
     bool is_loading() const { return is_loading_; }
 
+    /// Resolve the Fincept api_key for LLM/service callers WITHOUT touching the
+    /// plaintext SQLite settings table. Prefers the live in-memory session;
+    /// falls back to the encrypted SecureStorage copy (which load_session also
+    /// restores into the session at startup). Returns empty if no key is known.
+    /// This is the single supported resolver — callers must NOT read the legacy
+    /// plaintext "fincept_api_key" settings row.
+    QString fincept_api_key() const;
+
     // Auth flows
     void login(const QString& email, const QString& password, bool force_login = false);
+
+    /// Desktop Google sign-in via the website loopback handoff. Opens the
+    /// browser, redeems the returned one-time code, then drives the same
+    /// post-login flow as login() (emits login_succeeded / login_failed).
+    void login_with_google();
+
     void signup(const QString& username, const QString& email, const QString& password, const QString& phone,
                 const QString& country = {}, const QString& country_code = {});
     void verify_otp(const QString& email, const QString& otp);
@@ -70,10 +84,16 @@ class AuthManager : public QObject {
     void save_session();
     void load_session();
     void clear_session();
+    // One-shot: move secrets out of the legacy plaintext settings rows into
+    // SecureStorage, then purge the cleartext copies (CR-08). Idempotent.
+    void migrate_legacy_plaintext_credentials();
     void validate_saved_session();
     void fetch_user_profile(std::function<void()> on_done = {});
     void fetch_user_subscription(std::function<void()> on_done = {});
     void complete_auth_flow(std::function<void()> on_done);
+    /// Inject a redeemed desktop-handoff session (api_key + session_token) and
+    /// run the shared post-login flow. Shared by login_with_google().
+    void complete_desktop_login(const QString& api_key, const QString& session_token);
     void auto_configure_fincept_llm();
     QString generate_device_id() const;
     QJsonObject unwrap_data(const QJsonObject& raw) const;

@@ -2,16 +2,22 @@
 // Equity Order Entry — BUY/SELL form configurable per broker profile
 
 #include "trading/BrokerInterface.h"
+#include "trading/OptionsStrategyBuilder.h"
 #include "trading/TradingTypes.h"
 
 #include <QComboBox>
+#include <QEvent>
 #include <QLabel>
 #include <QLineEdit>
 #include <QPushButton>
+#include <QSet>
 #include <QTimer>
 #include <QWidget>
 
 #include <atomic>
+
+class QMenu;
+class QToolButton;
 
 namespace fincept::screens::equity {
 
@@ -34,14 +40,36 @@ class EquityOrderEntry : public QWidget {
   signals:
     void order_submitted(const trading::UnifiedOrder& order);
     void broadcast_requested(const trading::UnifiedOrder& order);
+    /// Emitted instead of order_submitted when the inline BROKERS selector has
+    /// ≥1 account checked — the same order goes to every selected account.
+    void multi_broker_submit(const trading::UnifiedOrder& order, const QStringList& account_ids);
+    void strategy_order_submitted(const trading::BasketOrderRequest& basket);
+
+  protected:
+    void changeEvent(QEvent* event) override;
 
   private slots:
     void on_submit();
+    void on_place_strategy();
 
   private:
     void update_cost_preview();
+    void retranslateUi();
     void set_buy_side(bool is_buy);
     void set_order_type(int idx);
+
+    // Resolve the current form selections into trading enums (dedups the
+    // order-type / product-type mapping repeated across submit/broadcast/margin).
+    trading::OrderType selected_order_type() const;
+    trading::ProductType selected_product_type() const;
+
+    // Inline multi-broker selector (QWidgetAction checkboxes keep the menu open).
+    void rebuild_brokers_menu();
+    void update_brokers_btn();
+
+    // Options strategy helpers
+    bool build_strategy(trading::OptionsStrategy& out) const; // returns false when strategy == None or inputs invalid
+    void refresh_strategy_preview();
 
     // Side tabs
     QPushButton* buy_tab_ = nullptr;
@@ -68,16 +96,47 @@ class EquityOrderEntry : public QWidget {
     QLineEdit* tp_edit_ = nullptr;
     QPushButton* submit_btn_ = nullptr;
     QPushButton* broadcast_btn_ = nullptr;
+    QToolButton* brokers_btn_ = nullptr;  // inline multi-broker selector
+    QMenu* brokers_menu_ = nullptr;       // checkable account list (stays open)
+    QSet<QString> broadcast_ids_;         // checked account_ids; empty = focused only
     QWidget* advanced_section_ = nullptr;
     QPushButton* advanced_toggle_ = nullptr;
 
+    // Options strategy section (collapsible, like advanced_section_)
+    QPushButton* strategy_toggle_ = nullptr;
+    QWidget* strategy_section_ = nullptr;
+    QComboBox* strategy_combo_ = nullptr;
+    QLineEdit* strat_strike_edit_ = nullptr; // ATM strike
+    QLineEdit* strat_expiry_edit_ = nullptr; // YYYY-MM-DD
+    QLineEdit* strat_lot_edit_ = nullptr;    // lot size (default 1)
+    QLineEdit* strat_width_edit_ = nullptr;  // width for strangle/condor/spreads
+    QLabel* strategy_preview_ = nullptr;
+    QPushButton* place_strategy_btn_ = nullptr;
+
     // Labels
+    QLabel* symbol_label_ = nullptr; // "SYMBOL · EXCHANGE" context line
     QLabel* balance_label_ = nullptr;
     QLabel* market_price_label_ = nullptr;
     QLabel* cost_label_ = nullptr;
     QLabel* margin_label_ = nullptr; // required margin from broker API
     QLabel* status_label_ = nullptr;
     QLabel* mode_label_ = nullptr;
+
+    // Static section / field titles (cached for retranslateUi)
+    QLabel* title_label_ = nullptr;
+    QLabel* product_title_ = nullptr;
+    QLabel* exchange_title_ = nullptr;
+    QLabel* qty_title_ = nullptr;
+    QLabel* price_title_ = nullptr;
+    QLabel* trigger_title_ = nullptr;
+    QLabel* sl_title_ = nullptr;
+    QLabel* tp_title_ = nullptr;
+    QLabel* strat_title_ = nullptr;
+    QLabel* strat_strike_title_ = nullptr;
+    QLabel* strat_expiry_title_ = nullptr;
+    QLabel* strat_lot_title_ = nullptr;
+    QLabel* strat_width_title_ = nullptr;
+    QLabel* strat_legs_title_ = nullptr;
 
     // State
     double balance_ = 0;

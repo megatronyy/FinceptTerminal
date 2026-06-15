@@ -1,817 +1,952 @@
 // src/screens/algo_trading/StrategyBuilderPanel.cpp
 #include "screens/algo_trading/StrategyBuilderPanel.h"
 
+#include "algo_engine/AlgoEngine.h"
+#include "algo_engine/fno/FnoAlgoTypes.h"
+#include "algo_engine/fno/FnoStrategyPreview.h"
+#include "core/currency/Currency.h"
+#include "core/events/EventBus.h"
 #include "core/logging/Logger.h"
+#include "screens/algo_trading/AlgoDeployDialog.h"
+#include "screens/fno/BuilderAnalyticsRibbon.h"
+#include "screens/fno/PayoffChartWidget.h"
 #include "services/algo_trading/AlgoTradingService.h"
-#include "services/file_manager/FileManagerService.h"
+#include "services/options/OptionChainService.h"
+#include "services/options/StrategyAnalytics.h"
+#include "trading/AccountManager.h"
+#include "trading/BrokerAccount.h"
+#include "trading/BrokerInterface.h"
+#include "trading/BrokerRegistry.h"
 #include "ui/theme/Theme.h"
+#include "ui/widgets/algo/FnoLegRuleEditor.h"
 
-#include <QFile>
-#include <QFileInfo>
+#include <QDate>
+#include <QDateEdit>
+#include <QEventLoop>
+#include <QFrame>
+#include <QFutureWatcher>
 #include <QGridLayout>
 #include <QHBoxLayout>
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
-#include <QRegularExpression>
+#include <QMessageBox>
 #include <QScrollArea>
+#include <QSet>
+#include <QSignalBlocker>
 #include <QSplitter>
+#include <QTimer>
 #include <QUuid>
+#include <QVBoxLayout>
+#include <QtConcurrent>
 
-// ── Shared style helpers ────────────────────────────────────────────────────
+#include <cmath>
 
+namespace fincept::screens {
+namespace algo_ns = fincept::algo;
+
+// ── Builder-local styling helpers ─────────────────────────────────────────────
+// Keep all the redesign's look-and-feel in one place so the layout code below
+// stays about structure. Everything reads from theme tokens; the Builder module's
+// signature orange (#FF6B35, matching the BUILDER tab) is the only literal.
 namespace {
 
-inline QString kMonoFont() {
-    return QString("font-family: %1;").arg(fincept::ui::fonts::DATA_FAMILY);
+constexpr const char* kBuilderOrange = "#FF6B35";
+
+// Uppercase, letter-spaced card title with a hairline underline (terminal style).
+QString card_header_style() {
+    return QString("color:%1;font-size:%2px;font-weight:700;letter-spacing:1px;"
+                   "font-family:%3;background:transparent;border:none;"
+                   "padding-bottom:3px;border-bottom:1px solid %4;")
+        .arg(ui::colors::TEXT_SECONDARY())
+        .arg(ui::fonts::TINY)
+        .arg(ui::fonts::DATA_FAMILY())
+        .arg(ui::colors::BORDER_DIM());
 }
-inline QString kLabelStyle() {
-    return QString("color: %1; font-size: %2px; font-weight: 700; letter-spacing: 0.5px; %3"
-                   "background: transparent; border: none;")
-        .arg(fincept::ui::colors::TEXT_SECONDARY())
-        .arg(fincept::ui::fonts::TINY)
-        .arg(kMonoFont());
+
+// Dim caption used for field labels and toolbar group captions.
+QString caption_style() {
+    return QString("color:%1;font-size:%2px;font-weight:700;letter-spacing:1px;"
+                   "font-family:%3;background:transparent;border:none;")
+        .arg(ui::colors::TEXT_TERTIARY())
+        .arg(ui::fonts::TINY)
+        .arg(ui::fonts::DATA_FAMILY());
 }
-inline QString kSectionLabel() {
-    return QString("color: %1; font-size: %2px; font-weight: 700; letter-spacing: 0.5px; %3"
-                   "background: transparent; border: none;")
-        .arg(fincept::ui::colors::AMBER())
-        .arg(fincept::ui::fonts::TINY)
-        .arg(kMonoFont());
+
+QLabel* field_label(const QString& text) {
+    auto* l = new QLabel(text);
+    l->setStyleSheet(caption_style());
+    return l;
 }
-inline QString kInputStyle() {
-    return QString("QLineEdit { background: %1; border: 1px solid %2; color: %3; padding: 4px 8px;"
-                   " font-size: %4px; %5 }"
-                   "QLineEdit:focus { border-color: %6; }")
-        .arg(fincept::ui::colors::BG_SURFACE(), fincept::ui::colors::BORDER_DIM(),
-             fincept::ui::colors::TEXT_PRIMARY())
-        .arg(fincept::ui::fonts::SMALL)
-        .arg(kMonoFont())
-        .arg(fincept::ui::colors::BORDER_BRIGHT());
+
+// A titled, bordered card with a colored left accent stripe. The child keeps its
+// own internal header; the stripe + border give the clear separation the redesign
+// is after. Object-name-scoped so the border does NOT cascade onto children.
+QFrame* make_card(QWidget* child, const QString& accent) {
+    auto* f = new QFrame();
+    f->setObjectName(QStringLiteral("builderCard"));
+    f->setStyleSheet(QString("QFrame#builderCard{background:%1;border:1px solid %2;"
+                             "border-left:2px solid %3;border-radius:5px;}")
+                         .arg(ui::colors::BG_RAISED(), ui::colors::BORDER_DIM())
+                         .arg(accent));
+    auto* l = new QVBoxLayout(f);
+    l->setContentsMargins(10, 8, 10, 10);
+    l->setSpacing(6);
+    l->addWidget(child);
+    return f;
 }
-inline QString kComboStyle() {
-    return QString("QComboBox { background: %1; color: %2; border: 1px solid %3; padding: 4px 8px;"
-                   " font-size: %4px; %5 }"
-                   "QComboBox::drop-down { border: none; }"
-                   "QComboBox QAbstractItemView { background: %1; color: %2; border: 1px solid %3;"
-                   " selection-background-color: %6; %5 }")
-        .arg(fincept::ui::colors::BG_SURFACE(), fincept::ui::colors::TEXT_PRIMARY(),
-             fincept::ui::colors::BORDER_DIM())
-        .arg(fincept::ui::fonts::SMALL)
-        .arg(kMonoFont())
-        .arg(fincept::ui::colors::BG_HOVER());
+
+// Outlined ghost buttons matching the Dashboard tab's STOP/REMOVE style:
+// transparent fill, colored 1px border + bold text, faint colored wash on hover.
+
+// Primary "go live" — the module's signature orange.
+QString deploy_btn_style() {
+    return QString("QPushButton{background:transparent;color:%1;border:1px solid %1;border-radius:2px;"
+                   "padding:5px 18px;font-weight:700;font-size:%2px;font-family:%3;}"
+                   "QPushButton:hover{background:rgba(255,107,53,0.12);}"
+                   "QPushButton:pressed{background:rgba(255,107,53,0.22);}")
+        .arg(kBuilderOrange)
+        .arg(ui::fonts::SMALL)
+        .arg(ui::fonts::DATA_FAMILY());
 }
-inline QString kSpinStyle() {
-    return QString("QDoubleSpinBox { background: %1; color: %2; border: 1px solid %3; padding: 4px 8px;"
-                   " font-size: %4px; %5 }"
-                   "QDoubleSpinBox::up-button, QDoubleSpinBox::down-button { width: 14px; }")
-        .arg(fincept::ui::colors::BG_SURFACE(), fincept::ui::colors::TEXT_PRIMARY(),
-             fincept::ui::colors::BORDER_DIM())
-        .arg(fincept::ui::fonts::SMALL)
-        .arg(kMonoFont());
+
+// Secondary "save" — neutral gray outline.
+QString save_btn_style() {
+    return QString("QPushButton{background:transparent;color:%1;border:1px solid %1;border-radius:2px;"
+                   "padding:5px 16px;font-weight:700;font-size:%2px;font-family:%3;}"
+                   "QPushButton:hover{background:rgba(128,128,128,0.14);}")
+        .arg(ui::colors::TEXT_SECONDARY())
+        .arg(ui::fonts::SMALL)
+        .arg(ui::fonts::DATA_FAMILY());
+}
+
+// The run-backtest action — amber outline (distinct hue from Deploy's orange,
+// and never adjacent to it since it lives in the right-hand setup card).
+QString run_btn_style() {
+    return QString("QPushButton{background:transparent;color:%1;border:1px solid %1;border-radius:2px;"
+                   "padding:7px 16px;font-weight:700;font-size:%2px;font-family:%3;letter-spacing:1px;}"
+                   "QPushButton:hover{background:rgba(217,119,6,0.12);}"
+                   "QPushButton:pressed{background:rgba(217,119,6,0.22);}"
+                   "QPushButton:disabled{color:%4;border-color:%4;}")
+        .arg(ui::colors::AMBER())
+        .arg(ui::fonts::SMALL)
+        .arg(ui::fonts::DATA_FAMILY())
+        .arg(ui::colors::TEXT_DIM());
+}
+
+QString chip_style() {
+    return QString("color:%1;background:%2;border:1px solid %3;border-radius:2px;"
+                   "padding:3px 8px;font-size:9px;font-weight:700;letter-spacing:1px;font-family:%4;")
+        .arg(ui::colors::AMBER(), ui::colors::ACCENT_BG(), ui::colors::AMBER_DIM())
+        .arg(ui::fonts::DATA_FAMILY());
+}
+
+QString status_style() {
+    return QString("color:%1;font-size:%2px;font-family:%3;background:transparent;border:none;")
+        .arg(ui::colors::TEXT_TERTIARY())
+        .arg(ui::fonts::TINY)
+        .arg(ui::fonts::DATA_FAMILY());
+}
+
+// Bounded fetch of the current LTP from the connected broker for deploy-time sanity
+// checks. Runs off-thread with a short timeout so the deploy click never hangs.
+double fetch_quote_ltp(const QString& broker_id, const QString& account_id, const QString& symbol,
+                       int timeout_ms) {
+    if (broker_id.isEmpty() || account_id.isEmpty() || symbol.isEmpty())
+        return 0.0;
+    auto fut = QtConcurrent::run([broker_id, account_id, symbol]() -> double {
+        auto* broker = trading::BrokerRegistry::instance().get(broker_id);
+        if (!broker)
+            return 0.0;
+        auto creds = trading::AccountManager::instance().load_credentials(account_id);
+        auto resp = broker->get_quotes(creds, {symbol});
+        if (resp.success && resp.data.has_value() && !resp.data->isEmpty())
+            return resp.data->first().ltp;
+        return 0.0;
+    });
+    QFutureWatcher<double> watcher;
+    QEventLoop loop;
+    QObject::connect(&watcher, &QFutureWatcher<double>::finished, &loop, &QEventLoop::quit);
+    watcher.setFuture(fut);
+    QTimer::singleShot(timeout_ms, &loop, &QEventLoop::quit);
+    loop.exec();
+    return watcher.isFinished() ? watcher.result() : 0.0;
+}
+
+// Collects human-readable warnings for price-based leaves that can't fire at `price`
+// (crossover already on the wrong side, or threshold wildly far from price). Only
+// price-scale indicators are checked — RSI<30 etc. are left alone.
+void scan_unreachable(const QJsonArray& conds, const QString& section, double price, QStringList& out) {
+    static const QSet<QString> price_inds = {"CLOSE", "OPEN", "HIGH", "LOW", "VWAP"};
+    for (const auto& v : conds) {
+        const QJsonObject o = v.toObject();
+        if (o.contains("children")) {
+            scan_unreachable(o.value("children").toArray(), section, price, out);
+            continue;
+        }
+        if (o.value("compare_mode").toString("value") != "value")
+            continue;
+        const QString ind = o.value("indicator").toString();
+        if (!price_inds.contains(ind))
+            continue;
+        const QString op = o.value("operator").toString();
+        const double val = o.value("value").toDouble();
+        if (val <= 0)
+            continue;
+        if (op == "crosses_above" && price > val)
+            out << QString("• %1 '%2 crosses above %3' — price %4 is already above; it can never cross up.")
+                       .arg(section, ind).arg(val, 0, 'f', 2).arg(price, 0, 'f', 2);
+        else if (op == "crosses_below" && price < val)
+            out << QString("• %1 '%2 crosses below %3' — price %4 is already below; it can never cross down.")
+                       .arg(section, ind).arg(val, 0, 'f', 2).arg(price, 0, 'f', 2);
+        else if (std::abs(price - val) / price > 0.25)
+            out << QString("• %1 '%2 %3 %4' — threshold is %5% away from price %6.")
+                       .arg(section, ind, op).arg(val, 0, 'f', 2)
+                       .arg(std::abs(price - val) / price * 100.0, 0, 'f', 0).arg(price, 0, 'f', 2);
+    }
 }
 
 } // namespace
 
-namespace fincept::screens {
-
-using namespace fincept::services::algo;
-
-// ── gather_from_layout ──────────────────────────────────────────────────────
-
-static QJsonArray gather_from_layout(QVBoxLayout* layout) {
-    QJsonArray arr;
-    for (int i = 0; i < layout->count(); ++i) {
-        auto* item = layout->itemAt(i);
-        auto* row  = item ? item->widget() : nullptr;
-        if (!row) continue;
-        auto* ind_combo   = qobject_cast<QComboBox*>(row->property("ind_combo").value<QObject*>());
-        auto* field_combo = qobject_cast<QComboBox*>(row->property("field_combo").value<QObject*>());
-        auto* op_combo    = qobject_cast<QComboBox*>(row->property("op_combo").value<QObject*>());
-        auto* val_spin    = qobject_cast<QDoubleSpinBox*>(row->property("val_spin").value<QObject*>());
-        if (!ind_combo || !field_combo || !op_combo || !val_spin) continue;
-        QJsonObject cond;
-        cond["indicator"] = ind_combo->currentData().toString();
-        cond["field"]     = field_combo->currentText();
-        cond["operator"]  = op_combo->currentText();
-        cond["value"]     = val_spin->value();
-        cond["params"]    = QJsonObject{};
-        arr.append(cond);
-    }
-    return arr;
-}
-
-// ── Constructor ─────────────────────────────────────────────────────────────
-
-StrategyBuilderPanel::StrategyBuilderPanel(QWidget* parent) : QWidget(parent) {
+StrategyBuilderPanel::StrategyBuilderPanel(QWidget* parent)
+    : QWidget(parent) {
+    setObjectName(QStringLiteral("strategyBuilderPanel"));
     build_ui();
     connect_service();
-    LOG_INFO("AlgoTrading", "StrategyBuilderPanel constructed");
 }
-
-// ── Service connections ─────────────────────────────────────────────────────
-
-void StrategyBuilderPanel::connect_service() {
-    auto& svc = AlgoTradingService::instance();
-    connect(&svc, &AlgoTradingService::strategy_saved, this, [this](const QString& id) {
-        if (status_label_)
-            status_label_->setText(QString("Strategy saved: %1").arg(id));
-        status_label_->setStyleSheet(
-            QString("color: %1; font-size: %2px; %3 background: transparent; border: none;")
-                .arg(fincept::ui::colors::POSITIVE())
-                .arg(fincept::ui::fonts::SMALL)
-                .arg(kMonoFont()));
-    });
-    connect(&svc, &AlgoTradingService::backtest_result, this,
-            &StrategyBuilderPanel::on_backtest_result);
-    connect(&svc, &AlgoTradingService::error_occurred, this,
-            &StrategyBuilderPanel::on_error);
-}
-
-// ── Condition row ───────────────────────────────────────────────────────────
-
-QWidget* StrategyBuilderPanel::build_condition_row(QWidget* parent) {
-    auto* row = new QWidget(parent);
-    row->setStyleSheet(QString("background: %1; border: 1px solid %2;")
-                           .arg(fincept::ui::colors::BG_SURFACE(), fincept::ui::colors::BORDER_DIM()));
-    auto* hl = new QHBoxLayout(row);
-    hl->setContentsMargins(6, 4, 6, 4);
-    hl->setSpacing(4);
-
-    auto* ind_combo = new QComboBox(row);
-    ind_combo->setStyleSheet(kComboStyle());
-    ind_combo->setFixedHeight(28);
-    ind_combo->setMinimumWidth(120);
-    const auto indicators = algo_indicators();
-    for (const auto& ind : indicators)
-        ind_combo->addItem(ind.label, ind.id);
-
-    auto* field_combo = new QComboBox(row);
-    field_combo->setStyleSheet(kComboStyle());
-    field_combo->setFixedHeight(28);
-    field_combo->setMinimumWidth(90);
-
-    connect(ind_combo, QOverload<int>::of(&QComboBox::currentIndexChanged), row,
-            [field_combo, indicators](int idx) {
-                field_combo->clear();
-                if (idx >= 0 && idx < indicators.size())
-                    field_combo->addItems(indicators[idx].fields);
-            });
-
-    auto* op_combo = new QComboBox(row);
-    op_combo->setStyleSheet(kComboStyle());
-    op_combo->setFixedHeight(28);
-    op_combo->setMinimumWidth(100);
-    op_combo->addItems(algo_operators());
-
-    auto* val_spin = new QDoubleSpinBox(row);
-    val_spin->setStyleSheet(kSpinStyle());
-    val_spin->setFixedHeight(28);
-    val_spin->setMinimumWidth(90);
-    val_spin->setRange(-1e9, 1e9);
-    val_spin->setDecimals(4);
-    val_spin->setValue(0);
-
-    auto* rm_btn = new QPushButton("X", row);
-    rm_btn->setFixedSize(28, 28);
-    rm_btn->setCursor(Qt::PointingHandCursor);
-    rm_btn->setStyleSheet(
-        QString("QPushButton { background: transparent; color: %1; border: 1px solid %2;"
-                " font-size: %3px; font-weight: 700; %4 }"
-                "QPushButton:hover { color: %5; border-color: %5; }")
-            .arg(fincept::ui::colors::TEXT_TERTIARY(), fincept::ui::colors::BORDER_DIM())
-            .arg(fincept::ui::fonts::TINY)
-            .arg(kMonoFont())
-            .arg(fincept::ui::colors::NEGATIVE()));
-    connect(rm_btn, &QPushButton::clicked, row, [row]() { row->deleteLater(); });
-
-    hl->addWidget(ind_combo);
-    hl->addWidget(field_combo);
-    hl->addWidget(op_combo);
-    hl->addWidget(val_spin);
-    hl->addWidget(rm_btn);
-
-    if (ind_combo->count() > 0)
-        emit ind_combo->currentIndexChanged(0);
-
-    row->setProperty("ind_combo",   QVariant::fromValue(static_cast<QObject*>(ind_combo)));
-    row->setProperty("field_combo", QVariant::fromValue(static_cast<QObject*>(field_combo)));
-    row->setProperty("op_combo",    QVariant::fromValue(static_cast<QObject*>(op_combo)));
-    row->setProperty("val_spin",    QVariant::fromValue(static_cast<QObject*>(val_spin)));
-
-    return row;
-}
-
-// ── Left pane: strategy editor ──────────────────────────────────────────────
-
-QWidget* StrategyBuilderPanel::build_left_pane() {
-    auto* pane = new QWidget(this);
-    pane->setStyleSheet(
-        QString("background: %1; border-right: 1px solid %2;")
-            .arg(fincept::ui::colors::BG_BASE(), fincept::ui::colors::BORDER_DIM()));
-
-    auto* root_layout = new QVBoxLayout(pane);
-    root_layout->setContentsMargins(0, 0, 0, 0);
-    root_layout->setSpacing(0);
-
-    auto* scroll = new QScrollArea(pane);
-    scroll->setWidgetResizable(true);
-    scroll->setFrameShape(QFrame::NoFrame);
-    scroll->setStyleSheet(
-        QString("QScrollArea { background: %1; border: none; }"
-                "QScrollBar:vertical { background: %1; width: 6px; }"
-                "QScrollBar::handle:vertical { background: %2; }"
-                "QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0; }")
-            .arg(fincept::ui::colors::BG_BASE(), fincept::ui::colors::BORDER_MED()));
-
-    auto* content = new QWidget;
-    content->setStyleSheet(QString("background: %1;").arg(fincept::ui::colors::BG_BASE()));
-    auto* vl = new QVBoxLayout(content);
-    vl->setContentsMargins(16, 12, 16, 12);
-    vl->setSpacing(8);
-
-    // ── Strategy Definition ─────────────────────────────────────────────────
-    auto* id_sec = new QLabel("STRATEGY DEFINITION", content);
-    id_sec->setStyleSheet(kSectionLabel());
-    vl->addWidget(id_sec);
-
-    auto* name_lbl = new QLabel("NAME", content);
-    name_lbl->setStyleSheet(kLabelStyle());
-    vl->addWidget(name_lbl);
-    name_edit_ = new QLineEdit(content);
-    name_edit_->setPlaceholderText("My Strategy");
-    name_edit_->setStyleSheet(kInputStyle());
-    name_edit_->setFixedHeight(30);
-    vl->addWidget(name_edit_);
-
-    auto* desc_lbl = new QLabel("DESCRIPTION", content);
-    desc_lbl->setStyleSheet(kLabelStyle());
-    vl->addWidget(desc_lbl);
-    desc_edit_ = new QLineEdit(content);
-    desc_edit_->setPlaceholderText("Strategy description...");
-    desc_edit_->setStyleSheet(kInputStyle());
-    desc_edit_->setFixedHeight(30);
-    vl->addWidget(desc_edit_);
-
-    auto* tf_lbl = new QLabel("TIMEFRAME", content);
-    tf_lbl->setStyleSheet(kLabelStyle());
-    vl->addWidget(tf_lbl);
-    timeframe_combo_ = new QComboBox(content);
-    timeframe_combo_->addItems(algo_timeframes());
-    timeframe_combo_->setStyleSheet(kComboStyle());
-    timeframe_combo_->setFixedHeight(30);
-    vl->addWidget(timeframe_combo_);
-
-    // ── Entry Conditions ────────────────────────────────────────────────────
-    auto* entry_hdr = new QWidget(content);
-    auto* entry_hdr_hl = new QHBoxLayout(entry_hdr);
-    entry_hdr_hl->setContentsMargins(0, 8, 0, 0);
-    entry_hdr_hl->setSpacing(8);
-    auto* entry_lbl = new QLabel("ENTRY CONDITIONS", entry_hdr);
-    entry_lbl->setStyleSheet(kSectionLabel());
-    entry_hdr_hl->addWidget(entry_lbl);
-    auto* entry_logic_lbl = new QLabel("Logic:", entry_hdr);
-    entry_logic_lbl->setStyleSheet(kLabelStyle());
-    entry_hdr_hl->addWidget(entry_logic_lbl);
-    entry_logic_combo_ = new QComboBox(entry_hdr);
-    entry_logic_combo_->addItems({"AND", "OR"});
-    entry_logic_combo_->setStyleSheet(kComboStyle());
-    entry_logic_combo_->setFixedHeight(26);
-    entry_logic_combo_->setFixedWidth(80);
-    entry_hdr_hl->addWidget(entry_logic_combo_);
-    entry_hdr_hl->addStretch();
-    vl->addWidget(entry_hdr);
-
-    auto* entry_container = new QWidget(content);
-    entry_conditions_layout_ = new QVBoxLayout(entry_container);
-    entry_conditions_layout_->setContentsMargins(0, 0, 0, 0);
-    entry_conditions_layout_->setSpacing(4);
-    vl->addWidget(entry_container);
-
-    auto* add_entry_btn = new QPushButton("+ ADD ENTRY CONDITION", content);
-    add_entry_btn->setCursor(Qt::PointingHandCursor);
-    add_entry_btn->setFixedHeight(28);
-    add_entry_btn->setStyleSheet(
-        QString("QPushButton { background: transparent; color: %1; border: 1px dashed %2;"
-                " font-size: %3px; font-weight: 700; %4 }"
-                "QPushButton:hover { color: %5; border-color: %5; }")
-            .arg(fincept::ui::colors::TEXT_TERTIARY(), fincept::ui::colors::BORDER_DIM())
-            .arg(fincept::ui::fonts::TINY)
-            .arg(kMonoFont())
-            .arg(fincept::ui::colors::AMBER()));
-    connect(add_entry_btn, &QPushButton::clicked, this, [this, entry_container]() {
-        entry_conditions_layout_->addWidget(build_condition_row(entry_container));
-    });
-    vl->addWidget(add_entry_btn);
-
-    // ── Exit Conditions ─────────────────────────────────────────────────────
-    auto* exit_hdr = new QWidget(content);
-    auto* exit_hdr_hl = new QHBoxLayout(exit_hdr);
-    exit_hdr_hl->setContentsMargins(0, 8, 0, 0);
-    exit_hdr_hl->setSpacing(8);
-    auto* exit_lbl = new QLabel("EXIT CONDITIONS", exit_hdr);
-    exit_lbl->setStyleSheet(kSectionLabel());
-    exit_hdr_hl->addWidget(exit_lbl);
-    auto* exit_logic_lbl = new QLabel("Logic:", exit_hdr);
-    exit_logic_lbl->setStyleSheet(kLabelStyle());
-    exit_hdr_hl->addWidget(exit_logic_lbl);
-    exit_logic_combo_ = new QComboBox(exit_hdr);
-    exit_logic_combo_->addItems({"AND", "OR"});
-    exit_logic_combo_->setStyleSheet(kComboStyle());
-    exit_logic_combo_->setFixedHeight(26);
-    exit_logic_combo_->setFixedWidth(80);
-    exit_hdr_hl->addWidget(exit_logic_combo_);
-    exit_hdr_hl->addStretch();
-    vl->addWidget(exit_hdr);
-
-    auto* exit_container = new QWidget(content);
-    exit_conditions_layout_ = new QVBoxLayout(exit_container);
-    exit_conditions_layout_->setContentsMargins(0, 0, 0, 0);
-    exit_conditions_layout_->setSpacing(4);
-    vl->addWidget(exit_container);
-
-    auto* add_exit_btn = new QPushButton("+ ADD EXIT CONDITION", content);
-    add_exit_btn->setCursor(Qt::PointingHandCursor);
-    add_exit_btn->setFixedHeight(28);
-    add_exit_btn->setStyleSheet(add_entry_btn->styleSheet());
-    connect(add_exit_btn, &QPushButton::clicked, this, [this, exit_container]() {
-        exit_conditions_layout_->addWidget(build_condition_row(exit_container));
-    });
-    vl->addWidget(add_exit_btn);
-
-    // ── Risk Management ─────────────────────────────────────────────────────
-    auto* risk_lbl = new QLabel("RISK MANAGEMENT", content);
-    risk_lbl->setStyleSheet(kSectionLabel());
-    vl->addWidget(risk_lbl);
-
-    auto* risk_grid = new QWidget(content);
-    auto* rgl = new QHBoxLayout(risk_grid);
-    rgl->setContentsMargins(0, 0, 0, 0);
-    rgl->setSpacing(12);
-
-    auto make_risk_field = [&](const QString& label, double def_val) -> QDoubleSpinBox* {
-        auto* col = new QWidget(risk_grid);
-        auto* cvl = new QVBoxLayout(col);
-        cvl->setContentsMargins(0, 0, 0, 0);
-        cvl->setSpacing(2);
-        auto* lbl = new QLabel(label, col);
-        lbl->setStyleSheet(kLabelStyle());
-        cvl->addWidget(lbl);
-        auto* spin = new QDoubleSpinBox(col);
-        spin->setStyleSheet(kSpinStyle());
-        spin->setFixedHeight(30);
-        spin->setRange(0.0, 100.0);
-        spin->setDecimals(2);
-        spin->setSuffix(" %");
-        spin->setValue(def_val);
-        spin->setSpecialValueText("DISABLED");
-        cvl->addWidget(spin);
-        rgl->addWidget(col);
-        return spin;
-    };
-
-    stop_loss_spin_     = make_risk_field("STOP LOSS %",     0.0);
-    take_profit_spin_   = make_risk_field("TAKE PROFIT %",   0.0);
-    trailing_stop_spin_ = make_risk_field("TRAILING STOP %", 0.0);
-    vl->addWidget(risk_grid);
-
-    vl->addStretch();
-
-    // ── Save button ─────────────────────────────────────────────────────────
-    auto* save_btn = new QPushButton("SAVE STRATEGY", content);
-    save_btn->setCursor(Qt::PointingHandCursor);
-    save_btn->setFixedHeight(36);
-    save_btn->setStyleSheet(
-        QString("QPushButton { background: rgba(217,119,6,0.1); color: %1; border: 1px solid %1;"
-                " font-size: %2px; font-weight: 700; %3 padding: 6px 24px; }"
-                "QPushButton:hover { background: %1; color: %4; }")
-            .arg(fincept::ui::colors::AMBER())
-            .arg(fincept::ui::fonts::DATA)
-            .arg(kMonoFont())
-            .arg(fincept::ui::colors::BG_BASE()));
-    connect(save_btn, &QPushButton::clicked, this, &StrategyBuilderPanel::on_save);
-    vl->addWidget(save_btn);
-
-    scroll->setWidget(content);
-    root_layout->addWidget(scroll);
-    return pane;
-}
-
-// ── Right pane: backtest workbench ──────────────────────────────────────────
-
-QWidget* StrategyBuilderPanel::build_right_pane() {
-    auto* pane = new QWidget(this);
-    pane->setStyleSheet(QString("background: %1;").arg(fincept::ui::colors::BG_BASE()));
-
-    auto* root_layout = new QVBoxLayout(pane);
-    root_layout->setContentsMargins(0, 0, 0, 0);
-    root_layout->setSpacing(0);
-
-    auto* scroll = new QScrollArea(pane);
-    scroll->setWidgetResizable(true);
-    scroll->setFrameShape(QFrame::NoFrame);
-    scroll->setStyleSheet(
-        QString("QScrollArea { background: %1; border: none; }"
-                "QScrollBar:vertical { background: %1; width: 6px; }"
-                "QScrollBar::handle:vertical { background: %2; }"
-                "QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0; }")
-            .arg(fincept::ui::colors::BG_BASE(), fincept::ui::colors::BORDER_MED()));
-
-    auto* content = new QWidget;
-    content->setStyleSheet(QString("background: %1;").arg(fincept::ui::colors::BG_BASE()));
-    auto* vl = new QVBoxLayout(content);
-    vl->setContentsMargins(16, 12, 16, 12);
-    vl->setSpacing(8);
-
-    // ── Backtest Parameters ─────────────────────────────────────────────────
-    auto* bt_sec = new QLabel("BACKTEST PARAMETERS", content);
-    bt_sec->setStyleSheet(kSectionLabel());
-    vl->addWidget(bt_sec);
-
-    // 2×2 grid of params
-    auto* params_grid = new QWidget(content);
-    auto* params_gl   = new QGridLayout(params_grid);
-    params_gl->setContentsMargins(0, 0, 0, 0);
-    params_gl->setSpacing(8);
-
-    auto make_param_col = [&](const QString& label_text, QWidget* input) -> QWidget* {
-        auto* col = new QWidget(params_grid);
-        auto* cvl = new QVBoxLayout(col);
-        cvl->setContentsMargins(0, 0, 0, 0);
-        cvl->setSpacing(2);
-        auto* lbl = new QLabel(label_text, col);
-        lbl->setStyleSheet(kLabelStyle());
-        cvl->addWidget(lbl);
-        input->setParent(col);
-        cvl->addWidget(input);
-        return col;
-    };
-
-    bt_symbol_ = new QLineEdit;
-    bt_symbol_->setPlaceholderText("RELIANCE");
-    bt_symbol_->setStyleSheet(kInputStyle());
-    bt_symbol_->setFixedHeight(30);
-    params_gl->addWidget(make_param_col("SYMBOL", bt_symbol_), 0, 0);
-
-    bt_capital_ = new QDoubleSpinBox;
-    bt_capital_->setStyleSheet(kSpinStyle());
-    bt_capital_->setFixedHeight(30);
-    bt_capital_->setRange(100, 1e9);
-    bt_capital_->setDecimals(0);
-    bt_capital_->setPrefix("$ ");
-    bt_capital_->setValue(100000);
-    params_gl->addWidget(make_param_col("CAPITAL ($)", bt_capital_), 0, 1);
-
-    bt_start_date_ = new QLineEdit;
-    bt_start_date_->setPlaceholderText("YYYY-MM-DD");
-    bt_start_date_->setText("2024-01-01");
-    bt_start_date_->setStyleSheet(kInputStyle());
-    bt_start_date_->setFixedHeight(30);
-    params_gl->addWidget(make_param_col("START DATE", bt_start_date_), 1, 0);
-
-    bt_end_date_ = new QLineEdit;
-    bt_end_date_->setPlaceholderText("YYYY-MM-DD");
-    bt_end_date_->setText("2025-01-01");
-    bt_end_date_->setStyleSheet(kInputStyle());
-    bt_end_date_->setFixedHeight(30);
-    params_gl->addWidget(make_param_col("END DATE", bt_end_date_), 1, 1);
-
-    vl->addWidget(params_grid);
-
-    // RUN BACKTEST button
-    auto* bt_btn = new QPushButton("RUN BACKTEST", content);
-    bt_btn->setCursor(Qt::PointingHandCursor);
-    bt_btn->setFixedHeight(36);
-    bt_btn->setStyleSheet(
-        QString("QPushButton { background: rgba(8,145,178,0.1); color: %1; border: 1px solid %1;"
-                " font-size: %2px; font-weight: 700; %3 padding: 6px 24px; }"
-                "QPushButton:hover { background: %1; color: %4; }")
-            .arg(fincept::ui::colors::CYAN())
-            .arg(fincept::ui::fonts::DATA)
-            .arg(kMonoFont())
-            .arg(fincept::ui::colors::BG_BASE()));
-    connect(bt_btn, &QPushButton::clicked, this, &StrategyBuilderPanel::on_backtest);
-    vl->addWidget(bt_btn);
-
-    // Status label
-    status_label_ = new QLabel("", content);
-    status_label_->setWordWrap(true);
-    status_label_->setStyleSheet(
-        QString("color: %1; font-size: %2px; %3 background: transparent; border: none;")
-            .arg(fincept::ui::colors::TEXT_TERTIARY())
-            .arg(fincept::ui::fonts::SMALL)
-            .arg(kMonoFont()));
-    vl->addWidget(status_label_);
-
-    // ── Results area ────────────────────────────────────────────────────────
-    auto* results_container = new QWidget(content);
-    results_layout_ = new QVBoxLayout(results_container);
-    results_layout_->setContentsMargins(0, 4, 0, 0);
-    results_layout_->setSpacing(8);
-
-    // Empty state
-    bt_empty_label_ = new QLabel("Run a backtest to see results", results_container);
-    bt_empty_label_->setAlignment(Qt::AlignCenter);
-    bt_empty_label_->setStyleSheet(
-        QString("color: %1; font-size: %2px; %3 background: transparent; border: none; padding: 24px;")
-            .arg(fincept::ui::colors::TEXT_TERTIARY())
-            .arg(fincept::ui::fonts::SMALL)
-            .arg(kMonoFont()));
-    results_layout_->addWidget(bt_empty_label_);
-
-    // KPI grid — hidden until first result
-    kpi_grid_widget_ = new QWidget(results_container);
-    kpi_grid_widget_->setVisible(false);
-
-    auto* kpi_gl = new QGridLayout(kpi_grid_widget_);
-    kpi_gl->setContentsMargins(0, 0, 0, 0);
-    kpi_gl->setSpacing(8);
-
-    // Helper to build one KPI card and wire up its labels
-    struct KpiDef {
-        QString  label;
-        QLabel** val_out;
-        QLabel** sub_out;
-    };
-
-    QList<KpiDef> kpi_defs = {
-        {"TOTAL RETURN",  &kpi_total_return_val_,  &kpi_total_return_sub_},
-        {"SHARPE RATIO",  &kpi_sharpe_val_,        &kpi_sharpe_sub_},
-        {"MAX DRAWDOWN",  &kpi_max_dd_val_,        &kpi_max_dd_sub_},
-        {"WIN RATE",      &kpi_win_rate_val_,      &kpi_win_rate_sub_},
-        {"TOTAL TRADES",  &kpi_trades_val_,        &kpi_trades_sub_},
-        {"PROFIT FACTOR", &kpi_profit_factor_val_, &kpi_profit_factor_sub_},
-    };
-
-    for (int i = 0; i < kpi_defs.size(); ++i) {
-        const auto& def = kpi_defs[i];
-
-        auto* card = new QWidget(kpi_grid_widget_);
-        card->setObjectName("btKpiCard");
-        card->setStyleSheet(
-            QString("#btKpiCard { background:%1; border:1px solid %2; border-radius:4px; }")
-                .arg(fincept::ui::colors::BG_SURFACE(), fincept::ui::colors::BORDER_DIM()));
-
-        auto* cl = new QVBoxLayout(card);
-        cl->setContentsMargins(12, 10, 12, 10);
-        cl->setSpacing(2);
-
-        auto* lbl = new QLabel(def.label, card);
-        lbl->setStyleSheet(
-            QString("color:%1; font-size:%2px; font-family:%3; font-weight:600; letter-spacing:1px;"
-                    " background:transparent; border:none;")
-                .arg(fincept::ui::colors::TEXT_TERTIARY())
-                .arg(fincept::ui::fonts::TINY)
-                .arg(fincept::ui::fonts::DATA_FAMILY));
-        cl->addWidget(lbl);
-
-        auto* val = new QLabel("—", card);
-        val->setStyleSheet(
-            QString("color:%1; font-size:%2px; font-family:%3; font-weight:800;"
-                    " background:transparent; border:none;")
-                .arg(fincept::ui::colors::TEXT_PRIMARY())
-                .arg(fincept::ui::fonts::HEADER + 2)
-                .arg(fincept::ui::fonts::DATA_FAMILY));
-        cl->addWidget(val);
-        *def.val_out = val;
-
-        auto* sub = new QLabel("", card);
-        sub->setStyleSheet(
-            QString("color:%1; font-size:%2px; font-family:%3;"
-                    " background:transparent; border:none;")
-                .arg(fincept::ui::colors::TEXT_TERTIARY())
-                .arg(fincept::ui::fonts::TINY)
-                .arg(fincept::ui::fonts::DATA_FAMILY));
-        cl->addWidget(sub);
-        *def.sub_out = sub;
-
-        kpi_gl->addWidget(card, i / 3, i % 3);
-    }
-
-    results_layout_->addWidget(kpi_grid_widget_);
-    vl->addWidget(results_container);
-    vl->addStretch();
-
-    scroll->setWidget(content);
-    root_layout->addWidget(scroll);
-    return pane;
-}
-
-// ── build_ui: QSplitter shell ────────────────────────────────────────────────
 
 void StrategyBuilderPanel::build_ui() {
-    auto* root = new QVBoxLayout(this);
-    root->setContentsMargins(0, 0, 0, 0);
-    root->setSpacing(0);
+    auto* main_layout = new QVBoxLayout(this);
+    main_layout->setContentsMargins(0, 0, 0, 0);
+    main_layout->setSpacing(0);
+
+    main_layout->addWidget(build_top_toolbar());
+
+    validation_banner_ = new QLabel(this);
+    validation_banner_->setObjectName(QStringLiteral("builderValidationBanner"));
+    validation_banner_->setWordWrap(true);
+    validation_banner_->setStyleSheet(
+        QString("background:%1;color:%2;border:1px solid %3;border-left:3px solid %2;"
+                "padding:6px 12px;font-size:%4px;font-weight:600;font-family:%5;")
+            .arg(ui::colors::NEGATIVE_BG(), ui::colors::NEGATIVE(), ui::colors::NEGATIVE_DIM())
+            .arg(ui::fonts::TINY)
+            .arg(ui::fonts::DATA_FAMILY()));
+    validation_banner_->setVisible(false);
+    main_layout->addWidget(validation_banner_);
 
     auto* splitter = new QSplitter(Qt::Horizontal, this);
-    splitter->setHandleWidth(4);
-    splitter->setStyleSheet(
-        QString("QSplitter::handle { background: %1; }")
-            .arg(fincept::ui::colors::BORDER_DIM()));
-    splitter->addWidget(build_left_pane());
-    splitter->addWidget(build_right_pane());
-    splitter->setStretchFactor(0, 2); // left ~40%
-    splitter->setStretchFactor(1, 3); // right ~60%
+    splitter->setObjectName(QStringLiteral("builderSplitter"));
+    splitter->setChildrenCollapsible(false);
+    splitter->setHandleWidth(6);
+    splitter->addWidget(build_left_panel());
+    splitter->addWidget(build_right_panel());
+    splitter->setStretchFactor(0, 46);
+    splitter->setStretchFactor(1, 54);
 
-    root->addWidget(splitter, 1);
+    main_layout->addWidget(splitter, 1);
 }
 
-// ── clear_results ────────────────────────────────────────────────────────────
+QWidget* StrategyBuilderPanel::build_top_toolbar() {
+    auto* toolbar = new QWidget(this);
+    toolbar->setObjectName(QStringLiteral("builderToolbar"));
+    toolbar->setFixedHeight(48);
+    toolbar->setStyleSheet(
+        QString("QWidget#builderToolbar{background:%1;border-bottom:1px solid %2;}")
+            .arg(ui::colors::BG_RAISED(), ui::colors::BORDER_DIM()));
+    auto* layout = new QHBoxLayout(toolbar);
+    layout->setContentsMargins(12, 6, 12, 6);
+    layout->setSpacing(8);
 
-void StrategyBuilderPanel::clear_results() {
-    bt_empty_label_->setVisible(true);
-    kpi_grid_widget_->setVisible(false);
-}
-
-// ── display_backtest_result — Quant Lab KPI card style ───────────────────────
-
-void StrategyBuilderPanel::display_backtest_result(const QJsonObject& payload) {
-    bt_empty_label_->setVisible(false);
-    kpi_grid_widget_->setVisible(true);
-
-    double total_return  = payload.value("total_return").toDouble();
-    double sharpe        = payload.value("sharpe_ratio").toDouble();
-    double max_dd        = payload.value("max_drawdown").toDouble();
-    int    total_trades  = payload.value("total_trades").toInt();
-    double win_rate      = payload.value("win_rate").toDouble();
-    double profit_factor = payload.value("profit_factor").toDouble();
-    double final_val     = payload.value("final_value").toDouble();
-
-    auto set_kpi = [](QLabel* lbl, const QString& text, const QString& color) {
-        lbl->setText(text);
-        lbl->setStyleSheet(
-            QString("color:%1; font-size:%2px; font-family:%3; font-weight:800;"
-                    " background:transparent; border:none;")
-                .arg(color)
-                .arg(fincept::ui::fonts::HEADER + 2)
-                .arg(fincept::ui::fonts::DATA_FAMILY));
+    auto caption = [this](const QString& text) {
+        auto* l = new QLabel(text, this);
+        l->setStyleSheet(caption_style());
+        return l;
+    };
+    auto divider = [this]() {
+        auto* d = new QWidget(this);
+        d->setFixedSize(1, 24);
+        d->setStyleSheet(QString("background:%1;").arg(ui::colors::BORDER_DIM()));
+        return d;
     };
 
-    // TOTAL RETURN
-    set_kpi(kpi_total_return_val_,
-            QString("%1%2%").arg(total_return >= 0 ? "+" : "").arg(total_return, 0, 'f', 2),
-            total_return >= 0 ? fincept::ui::colors::POSITIVE : fincept::ui::colors::NEGATIVE);
-    kpi_total_return_sub_->setText(
-        QString("Final: $%1").arg(final_val, 0, 'f', 0));
+    // ── Identity group: name + description ──
+    name_edit_ = new QLineEdit(this);
+    name_edit_->setObjectName(QStringLiteral("builderNameEdit"));
+    name_edit_->setPlaceholderText(tr("Strategy Name"));
+    name_edit_->setMinimumWidth(150);
 
-    // SHARPE
-    set_kpi(kpi_sharpe_val_, QString::number(sharpe, 'f', 3),
-            sharpe >= 0.5 ? fincept::ui::colors::POSITIVE : fincept::ui::colors::NEGATIVE);
-    kpi_sharpe_sub_->setText(sharpe >= 1.0 ? "Excellent" : sharpe >= 0.5 ? "Good" : "Weak");
+    desc_edit_ = new QLineEdit(this);
+    desc_edit_->setObjectName(QStringLiteral("builderDescEdit"));
+    desc_edit_->setPlaceholderText(tr("Description (optional)"));
+    desc_edit_->setMinimumWidth(150);
 
-    // MAX DRAWDOWN (always red)
-    set_kpi(kpi_max_dd_val_,
-            QString("-%1%").arg(qAbs(max_dd), 0, 'f', 2),
-            fincept::ui::colors::NEGATIVE);
-    kpi_max_dd_sub_->setText("Max Drawdown");
+    // ── Config group: timeframe (a saved strategy property) + template loader ──
+    timeframe_combo_ = new QComboBox(this);
+    timeframe_combo_->setObjectName(QStringLiteral("builderTimeframe"));
+    for (const auto& tf : services::algo::algo_timeframes())
+        timeframe_combo_->addItem(tf);
+    timeframe_combo_->setCurrentText(QStringLiteral("5m"));
+    timeframe_combo_->setToolTip(tr("Bar timeframe the entry/exit rules evaluate on"));
 
-    // WIN RATE
-    set_kpi(kpi_win_rate_val_,
-            QString("%1%").arg(win_rate, 0, 'f', 1),
-            win_rate >= 50.0 ? fincept::ui::colors::POSITIVE : fincept::ui::colors::NEGATIVE);
-    kpi_win_rate_sub_->setText(win_rate >= 50.0 ? "Above average" : "Below average");
+    template_combo_ = new QComboBox(this);
+    template_combo_->setObjectName(QStringLiteral("builderTemplateCombo"));
+    template_combo_->addItem(tr("Templates…"));
+    for (const auto& t : services::algo::algo_strategy_templates())
+        template_combo_->addItem(t.name);
+    template_combo_->setToolTip(tr("Load a ready-made strategy as a starting point"));
 
-    // TOTAL TRADES
-    set_kpi(kpi_trades_val_, QString::number(total_trades), fincept::ui::colors::TEXT_PRIMARY);
-    kpi_trades_sub_->setText("Total trades");
+    // ── Instrument-type selector (P2.3) ──
+    instrument_type_combo_ = new QComboBox(this);
+    instrument_type_combo_->setObjectName(QStringLiteral("builderInstrumentType"));
+    instrument_type_combo_->addItem(tr("Equity"),  QStringLiteral("equity"));
+    instrument_type_combo_->addItem(tr("Option"),  QStringLiteral("option"));
+    instrument_type_combo_->addItem(tr("Future"),  QStringLiteral("future"));
+    instrument_type_combo_->setToolTip(tr("Instrument type this strategy trades"));
 
-    // PROFIT FACTOR
-    set_kpi(kpi_profit_factor_val_, QString::number(profit_factor, 'f', 2),
-            profit_factor >= 1.0 ? fincept::ui::colors::POSITIVE : fincept::ui::colors::NEGATIVE);
-    kpi_profit_factor_sub_->setText(profit_factor >= 1.5 ? "Strong" : profit_factor >= 1.0 ? "Profitable" : "Losing");
+    // ── State chip + primary actions ──
+    state_chip_ = new QLabel(tr("NEW DRAFT"), this);
+    state_chip_->setObjectName(QStringLiteral("builderStateChip"));
+    state_chip_->setStyleSheet(chip_style());
+
+    save_btn_ = new QPushButton(tr("Save"), this);
+    save_btn_->setObjectName(QStringLiteral("builderSaveBtn"));
+    save_btn_->setCursor(Qt::PointingHandCursor);
+    save_btn_->setToolTip(tr("Save this strategy to My Strategies"));
+    save_btn_->setStyleSheet(save_btn_style());
+
+    deploy_btn_ = new QPushButton(tr("Deploy ▸"), this);
+    deploy_btn_->setObjectName(QStringLiteral("builderDeployBtn"));
+    deploy_btn_->setCursor(Qt::PointingHandCursor);
+    deploy_btn_->setToolTip(tr("Go live (paper or real) with this strategy"));
+    deploy_btn_->setStyleSheet(deploy_btn_style());
+
+    // backtest_btn_ + symbol_combo_ now live in the right-hand BACKTEST SETUP card,
+    // beside the rest of the test inputs — created in build_right_panel().
+
+    layout->addWidget(caption(tr("NAME")));
+    layout->addWidget(name_edit_, 1);
+    layout->addWidget(caption(tr("DESC")));
+    layout->addWidget(desc_edit_, 1);
+    layout->addWidget(divider());
+    layout->addWidget(caption(tr("TF")));
+    layout->addWidget(timeframe_combo_);
+    layout->addWidget(template_combo_);
+    layout->addWidget(divider());
+    layout->addWidget(caption(tr("TYPE")));
+    layout->addWidget(instrument_type_combo_);
+    layout->addStretch();
+    layout->addWidget(state_chip_);
+    layout->addWidget(save_btn_);
+    layout->addWidget(deploy_btn_);
+
+    connect(save_btn_, &QPushButton::clicked, this, &StrategyBuilderPanel::on_save);
+    connect(deploy_btn_, &QPushButton::clicked, this, &StrategyBuilderPanel::on_deploy);
+    connect(template_combo_, QOverload<int>::of(&QComboBox::activated), this,
+            &StrategyBuilderPanel::load_template);
+    connect(instrument_type_combo_, QOverload<int>::of(&QComboBox::currentIndexChanged), this,
+            &StrategyBuilderPanel::on_instrument_type_changed);
+
+    return toolbar;
 }
 
-// ── on_backtest_result ───────────────────────────────────────────────────────
+QWidget* StrategyBuilderPanel::build_left_panel() {
+    auto* scroll = new QScrollArea(this);
+    scroll->setObjectName(QStringLiteral("builderLeftScroll"));
+    scroll->setWidgetResizable(true);
+    scroll->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+    scroll->setFrameShape(QFrame::NoFrame);
 
-void StrategyBuilderPanel::on_backtest_result(const QJsonObject& payload) {
-    status_label_->setText("Backtest complete.");
-    status_label_->setStyleSheet(
-        QString("color: %1; font-size: %2px; %3 background: transparent; border: none;")
-            .arg(fincept::ui::colors::POSITIVE())
-            .arg(fincept::ui::fonts::SMALL)
-            .arg(kMonoFont()));
-    display_backtest_result(payload);
-    LOG_INFO("AlgoTrading", "Backtest result displayed");
+    auto* content = new QWidget(this);
+    auto* layout = new QVBoxLayout(content);
+    layout->setContentsMargins(10, 10, 6, 10);
+    layout->setSpacing(10);
+
+    entry_section_ = new ui::algo::ConditionSection(
+        ui::algo::ConditionSection::Type::Entry, this);
+    exit_section_ = new ui::algo::ConditionSection(
+        ui::algo::ConditionSection::Type::Exit, this);
+    risk_panel_ = new ui::algo::RiskManagementPanel(this);
+
+    // Color-coded cards build an instant visual language: green = entry/buy,
+    // red = exit/sell, orange = risk. Each child keeps its own internal header.
+    layout->addWidget(make_card(entry_section_, ui::colors::POSITIVE()));
+    layout->addWidget(make_card(exit_section_, ui::colors::NEGATIVE()));
+    layout->addWidget(make_card(risk_panel_, QString::fromLatin1(kBuilderOrange)));
+    layout->addStretch();
+
+    scroll->setWidget(content);
+    return scroll;
 }
 
-// ── on_save ──────────────────────────────────────────────────────────────────
+QWidget* StrategyBuilderPanel::build_right_panel() {
+    auto* right = new QWidget(this);
+    auto* layout = new QVBoxLayout(right);
+    layout->setContentsMargins(6, 10, 10, 10);
+    layout->setSpacing(10);
 
-void StrategyBuilderPanel::on_save() {
-    if (name_edit_->text().trimmed().isEmpty()) {
-        status_label_->setText("Strategy name is required.");
-        status_label_->setStyleSheet(
-            QString("color: %1; font-size: %2px; %3 background: transparent; border: none;")
-                .arg(fincept::ui::colors::NEGATIVE())
-                .arg(fincept::ui::fonts::SMALL)
-                .arg(kMonoFont()));
+    // ── BACKTEST SETUP card — every test input in one place ──────────────────
+    auto* setup_card = new QFrame(right);
+    bt_setup_card_ = setup_card;  // store for show/hide in on_instrument_type_changed
+    setup_card->setObjectName(QStringLiteral("builderSetupCard"));
+    setup_card->setStyleSheet(QString("QFrame#builderSetupCard{background:%1;border:1px solid %2;"
+                                       "border-left:2px solid %3;border-radius:5px;}")
+                                  .arg(ui::colors::BG_RAISED(), ui::colors::BORDER_DIM())
+                                  .arg(ui::colors::CYAN()));
+    auto* setup = new QVBoxLayout(setup_card);
+    setup->setContentsMargins(12, 10, 12, 12);
+    setup->setSpacing(8);
+
+    bt_header_ = new QLabel(tr("BACKTEST SETUP"), this);
+    bt_header_->setObjectName(QStringLiteral("builderBtHeader"));
+    bt_header_->setStyleSheet(card_header_style());
+    setup->addWidget(bt_header_);
+
+    // Symbol moved here from the top toolbar so it sits with the other test inputs.
+    symbol_combo_ = new ui::algo::SymbolSearchCombo(this);
+    symbol_combo_->setMinimumWidth(140);
+
+    bt_capital_ = new QDoubleSpinBox(this);
+    bt_capital_->setObjectName(QStringLiteral("builderBtCapital"));
+    bt_capital_->setRange(1000, 100000000);
+    bt_capital_->setDecimals(0);
+    bt_capital_->setValue(100000);
+    cur::bindPrefix(bt_capital_); // backtest capital is user-denominated
+
+    const QDate today = QDate::currentDate();
+    bt_start_date_ = new QDateEdit(this);
+    bt_start_date_->setObjectName(QStringLiteral("builderBtStart"));
+    bt_start_date_->setCalendarPopup(true);
+    bt_start_date_->setDisplayFormat(QStringLiteral("yyyy-MM-dd"));
+    bt_start_date_->setMinimumDate(QDate(2000, 1, 1));
+    bt_start_date_->setMaximumDate(today);
+    bt_start_date_->setDate(today.addYears(-1));
+
+    bt_end_date_ = new QDateEdit(this);
+    bt_end_date_->setObjectName(QStringLiteral("builderBtEnd"));
+    bt_end_date_->setCalendarPopup(true);
+    bt_end_date_->setDisplayFormat(QStringLiteral("yyyy-MM-dd"));
+    bt_end_date_->setMinimumDate(QDate(2000, 1, 1));
+    bt_end_date_->setMaximumDate(today);
+    bt_end_date_->setDate(today);
+
+    bt_symbol_label_ = field_label(tr("Symbol"));
+    bt_capital_label_ = field_label(tr("Capital"));
+    bt_start_label_ = field_label(tr("From"));
+    bt_end_label_ = field_label(tr("To"));
+
+    auto* bt_grid = new QGridLayout();
+    bt_grid->setHorizontalSpacing(8);
+    bt_grid->setVerticalSpacing(8);
+    bt_grid->setColumnStretch(1, 1);
+    bt_grid->setColumnStretch(3, 1);
+    bt_grid->addWidget(bt_symbol_label_, 0, 0);
+    bt_grid->addWidget(symbol_combo_, 0, 1, 1, 3);
+    bt_grid->addWidget(bt_capital_label_, 1, 0);
+    bt_grid->addWidget(bt_capital_, 1, 1, 1, 3);
+    bt_grid->addWidget(bt_start_label_, 2, 0);
+    bt_grid->addWidget(bt_start_date_, 2, 1);
+    bt_grid->addWidget(bt_end_label_, 2, 2);
+    bt_grid->addWidget(bt_end_date_, 2, 3);
+    setup->addLayout(bt_grid);
+
+    backtest_btn_ = new QPushButton(tr("▶  RUN BACKTEST"), this);
+    backtest_btn_->setObjectName(QStringLiteral("builderBacktestBtn"));
+    backtest_btn_->setCursor(Qt::PointingHandCursor);
+    backtest_btn_->setMinimumHeight(32);
+    backtest_btn_->setStyleSheet(run_btn_style());
+    setup->addWidget(backtest_btn_);
+
+    // Transient feedback lives right under the run button, where the eye already is.
+    status_label_ = new QLabel(this);
+    status_label_->setObjectName(QStringLiteral("builderStatus"));
+    status_label_->setWordWrap(true);
+    status_label_->setStyleSheet(status_style());
+    setup->addWidget(status_label_);
+
+    layout->addWidget(setup_card);
+
+    // ── F&O section (P2.3) — hidden until instrument type != equity ──────────
+    build_fno_section();
+    layout->addWidget(fno_section_);
+    fno_section_->setVisible(false); // equity is default
+
+    // ── RESULTS card — clearly separated from the controls above ─────────────
+    auto* results_card = new QFrame(right);
+    results_card->setObjectName(QStringLiteral("builderResultsCard"));
+    results_card->setStyleSheet(QString("QFrame#builderResultsCard{background:%1;border:1px solid %2;"
+                                        "border-radius:5px;}")
+                                    .arg(ui::colors::BG_RAISED(), ui::colors::BORDER_DIM()));
+    auto* results = new QVBoxLayout(results_card);
+    results->setContentsMargins(12, 10, 12, 12);
+    results->setSpacing(8);
+
+    results_header_ = new QLabel(tr("RESULTS"), this);
+    results_header_->setObjectName(QStringLiteral("builderResultsHeader"));
+    results_header_->setStyleSheet(card_header_style());
+    results->addWidget(results_header_);
+
+    report_panel_ = new ui::algo::BacktestReportPanel(this);
+    results->addWidget(report_panel_, 1);
+
+    layout->addWidget(results_card, 1);
+
+    connect(backtest_btn_, &QPushButton::clicked, this, &StrategyBuilderPanel::on_backtest);
+
+    return right;
+}
+
+// ── F&O Section (P2.3) ───────────────────────────────────────────────────────
+
+void StrategyBuilderPanel::build_fno_section() {
+    fno_section_ = new QWidget(this);
+    fno_section_->setObjectName(QStringLiteral("builderFnoSection"));
+
+    auto* layout = new QVBoxLayout(fno_section_);
+    layout->setContentsMargins(0, 0, 0, 0);
+    layout->setSpacing(6);
+
+    // ── Header row: underlying + expiry mode ──
+    auto* header_row = new QHBoxLayout();
+    header_row->setSpacing(8);
+
+    underlying_combo_ = new QComboBox(fno_section_);
+    underlying_combo_->setObjectName(QStringLiteral("builderFnoUnderlying"));
+    underlying_combo_->setToolTip(tr("Underlying instrument"));
+    underlying_combo_->setMinimumWidth(100);
+    populate_underlyings();
+
+    expiry_mode_combo_ = new QComboBox(fno_section_);
+    expiry_mode_combo_->setObjectName(QStringLiteral("builderFnoExpiryMode"));
+    expiry_mode_combo_->setToolTip(tr("Expiry selection rule"));
+    expiry_mode_combo_->addItem(tr("Weekly"),      QStringLiteral("weekly"));
+    expiry_mode_combo_->addItem(tr("Monthly"),     QStringLiteral("monthly"));
+    expiry_mode_combo_->addItem(tr("Nearest DTE"), QStringLiteral("nearest_dte"));
+    expiry_mode_combo_->addItem(tr("Absolute"),    QStringLiteral("absolute"));
+
+    header_row->addWidget(field_label(tr("Underlying")));
+    header_row->addWidget(underlying_combo_, 1);
+    header_row->addWidget(field_label(tr("Expiry")));
+    header_row->addWidget(expiry_mode_combo_, 1);
+    layout->addLayout(header_row);
+
+    // ── Leg rule editor ──
+    leg_editor_ = new fincept::ui::algo::FnoLegRuleEditor(fno_section_);
+    layout->addWidget(leg_editor_);
+
+    // ── Analytics ribbon + payoff chart ──
+    analytics_ribbon_ = new fincept::screens::fno::BuilderAnalyticsRibbon(fno_section_);
+    layout->addWidget(analytics_ribbon_);
+
+    payoff_chart_ = new fincept::screens::fno::PayoffChartWidget(fno_section_);
+    payoff_chart_->setMinimumHeight(200);
+    layout->addWidget(payoff_chart_, 1);
+
+    // Connect all preview-trigger signals to refresh_fno_preview()
+    connect(leg_editor_, &fincept::ui::algo::FnoLegRuleEditor::legs_changed,
+            this, &StrategyBuilderPanel::refresh_fno_preview);
+    connect(underlying_combo_, QOverload<int>::of(&QComboBox::currentIndexChanged),
+            this, &StrategyBuilderPanel::refresh_fno_preview);
+    connect(expiry_mode_combo_, QOverload<int>::of(&QComboBox::currentIndexChanged),
+            this, &StrategyBuilderPanel::refresh_fno_preview);
+    connect(&fincept::services::options::OptionChainService::instance(),
+            &fincept::services::options::OptionChainService::chain_published,
+            this, [this](const fincept::services::options::OptionChain&) {
+                refresh_fno_preview();
+            });
+}
+
+void StrategyBuilderPanel::populate_underlyings() {
+    if (!underlying_combo_)
         return;
-    }
-
-    AlgoStrategy strategy;
-    strategy.id               = QUuid::createUuid().toString(QUuid::WithoutBraces);
-    strategy.name             = name_edit_->text().trimmed();
-    strategy.description      = desc_edit_->text().trimmed();
-    strategy.timeframe        = timeframe_combo_->currentText();
-    strategy.entry_conditions = gather_from_layout(entry_conditions_layout_);
-    strategy.exit_conditions  = gather_from_layout(exit_conditions_layout_);
-    strategy.entry_logic      = entry_logic_combo_->currentText();
-    strategy.exit_logic       = exit_logic_combo_->currentText();
-    strategy.stop_loss        = stop_loss_spin_->value();
-    strategy.take_profit      = take_profit_spin_->value();
-    strategy.trailing_stop    = trailing_stop_spin_->value();
-
-    status_label_->setText("Saving...");
-    status_label_->setStyleSheet(
-        QString("color: %1; font-size: %2px; %3 background: transparent; border: none;")
-            .arg(fincept::ui::colors::TEXT_SECONDARY())
-            .arg(fincept::ui::fonts::SMALL)
-            .arg(kMonoFont()));
-
-    AlgoTradingService::instance().save_strategy(strategy);
-    LOG_INFO("AlgoTrading", QString("Saving strategy: %1").arg(strategy.name));
-
+    const QStringList list =
+        fincept::services::options::OptionChainService::instance().list_underlyings(fno_broker_id());
     {
-        QJsonObject json;
-        json["id"]            = strategy.id;
-        json["name"]          = strategy.name;
-        json["description"]   = strategy.description;
-        json["timeframe"]     = strategy.timeframe;
-        json["entry_logic"]   = strategy.entry_logic;
-        json["exit_logic"]    = strategy.exit_logic;
-        json["stop_loss"]     = strategy.stop_loss;
-        json["take_profit"]   = strategy.take_profit;
-        json["trailing_stop"] = strategy.trailing_stop;
-
-        QJsonArray entry_arr;
-        for (const auto& c : strategy.entry_conditions) entry_arr.append(c);
-        json["entry_conditions"] = entry_arr;
-
-        QJsonArray exit_arr;
-        for (const auto& c : strategy.exit_conditions) exit_arr.append(c);
-        json["exit_conditions"] = exit_arr;
-
-        QString safe_name = strategy.name;
-        safe_name.replace(QRegularExpression("[^a-zA-Z0-9_\\-]"), "_");
-        QString dest = services::FileManagerService::instance().storage_dir() + "/" +
-                       safe_name + "_" + strategy.id.left(8) + ".json";
-
-        QFile f(dest);
-        if (f.open(QIODevice::WriteOnly | QIODevice::Text)) {
-            f.write(QJsonDocument(json).toJson(QJsonDocument::Indented));
-            f.close();
-            services::FileManagerService::instance().register_file(
-                safe_name + "_" + strategy.id.left(8) + ".json",
-                strategy.name + ".json", QFileInfo(dest).size(),
-                "application/json", "algo_trading");
+        QSignalBlocker blocker(underlying_combo_);
+        underlying_combo_->clear();
+        if (list.isEmpty()) {
+            underlying_combo_->addItem(tr("(connect broker)"));
+            underlying_combo_->setEnabled(false);
+        } else {
+            for (const auto& u : list)
+                underlying_combo_->addItem(u);
+            underlying_combo_->setEnabled(true);
         }
     }
 }
 
-// ── on_backtest ──────────────────────────────────────────────────────────────
+void StrategyBuilderPanel::refresh_fno_preview() {
+    namespace an = fincept::services::options::analytics;
+    const auto& chain = fincept::services::options::OptionChainService::instance().last_chain();
+    const auto legs = leg_editor_->legs();
+    if (legs.isEmpty() || chain.rows.isEmpty()) {
+        analytics_ribbon_->clear();
+        payoff_chart_->clear_payoff();
+        return;
+    }
+    fincept::services::options::Strategy s = fincept::algo::fno::build_preview_strategy(legs, chain);
+    an::PayoffComputeOptions opts;
+    opts.current_spot = chain.spot;
+    const auto curve = an::compute_payoff(s, opts);
+    const auto bes = an::compute_breakevens(curve);
+    const auto a = an::compute_all(s, chain, opts);
+    payoff_chart_->set_payoff(curve, chain.spot, bes);
+    analytics_ribbon_->update_from(s, a);
+}
 
-void StrategyBuilderPanel::on_backtest() {
-    QString symbol = bt_symbol_->text().trimmed();
-    if (symbol.isEmpty()) {
-        status_label_->setText("Enter a symbol for backtesting.");
-        status_label_->setStyleSheet(
-            QString("color: %1; font-size: %2px; %3 background: transparent; border: none;")
-                .arg(fincept::ui::colors::NEGATIVE())
-                .arg(fincept::ui::fonts::SMALL)
-                .arg(kMonoFont()));
+void StrategyBuilderPanel::on_instrument_type_changed() {
+    if (!instrument_type_combo_)
+        return;
+    const QString type = instrument_type_combo_->currentData().toString();
+    if (type == QLatin1String("equity")) {
+        if (bt_setup_card_) bt_setup_card_->setVisible(true);
+        if (fno_section_)   fno_section_->setVisible(false);
+    } else {
+        if (bt_setup_card_) bt_setup_card_->setVisible(false);
+        if (fno_section_)   fno_section_->setVisible(true);
+        if (underlying_combo_) populate_underlyings();
+        refresh_fno_preview();
+    }
+}
+
+QString StrategyBuilderPanel::fno_broker_id() const {
+    // Mirror ChainSubTab: prefer a Connected account's broker_id, else "databento".
+    for (const auto& acc : fincept::trading::AccountManager::instance().active_accounts()) {
+        if (fincept::trading::AccountManager::instance().connection_state(acc.account_id) ==
+            fincept::trading::ConnectionState::Connected)
+            return acc.broker_id;
+    }
+    return QStringLiteral("databento");
+}
+
+void StrategyBuilderPanel::connect_service() {
+    auto& svc = services::algo::AlgoTradingService::instance();
+    connect(&svc, &services::algo::AlgoTradingService::backtest_result,
+            this, &StrategyBuilderPanel::on_backtest_result);
+    connect(&svc, &services::algo::AlgoTradingService::error_occurred,
+            this, &StrategyBuilderPanel::on_error);
+    connect(&svc, &services::algo::AlgoTradingService::strategy_saved,
+            this, [this](const QString& id) {
+                status_label_->setText(tr("Strategy saved: %1").arg(id));
+            });
+}
+
+services::algo::AlgoStrategy StrategyBuilderPanel::build_strategy() {
+    if (loaded_strategy_id_.isEmpty())
+        loaded_strategy_id_ = QUuid::createUuid().toString(QUuid::WithoutBraces);
+
+    services::algo::AlgoStrategy strat;
+    strat.id = loaded_strategy_id_;
+    strat.name = name_edit_->text().trimmed();
+    strat.description = desc_edit_->text().trimmed();
+    strat.timeframe = timeframe_combo_->currentText();
+    strat.entry_conditions = entry_section_->conditions();
+    strat.exit_conditions = exit_section_->conditions();
+    strat.entry_logic = entry_section_->combined_logic();
+    strat.exit_logic = exit_section_->combined_logic();
+    strat.stop_loss = risk_panel_->stop_loss();
+    strat.take_profit = risk_panel_->take_profit();
+    strat.trailing_stop = risk_panel_->trailing_stop();
+    strat.position_size_pct = risk_panel_->capital_pct();
+    // P2.3: persist instrument type and F&O leg rules
+    strat.instrument_type = instrument_type_combo_ ? instrument_type_combo_->currentData().toString()
+                                                   : QStringLiteral("equity");
+    if (strat.instrument_type != QLatin1String("equity") && leg_editor_)
+        strat.legs = fincept::algo::fno::fno_legs_to_json(leg_editor_->legs());
+    return strat;
+}
+
+void StrategyBuilderPanel::on_save() {
+    if (name_edit_->text().trimmed().isEmpty()) {
+        status_label_->setText(tr("Please enter a strategy name."));
         return;
     }
 
-    status_label_->setText("Running backtest...");
-    status_label_->setStyleSheet(
-        QString("color: %1; font-size: %2px; %3 background: transparent; border: none;")
-            .arg(fincept::ui::colors::CYAN())
-            .arg(fincept::ui::fonts::SMALL)
-            .arg(kMonoFont()));
-
-    QString start_date = bt_start_date_->text().trimmed();
-    QString end_date   = bt_end_date_->text().trimmed();
-    if (start_date.isEmpty()) start_date = "2024-01-01";
-    if (end_date.isEmpty())   end_date   = "2025-01-01";
-
-    QString strat_id = name_edit_->text().trimmed();
-    double  capital  = bt_capital_->value();
-
-    AlgoTradingService::instance().run_backtest(strat_id, symbol, start_date, end_date, capital);
-    LOG_INFO("AlgoTrading", QString("Backtest requested: %1 on %2").arg(strat_id, symbol));
+    services::algo::AlgoTradingService::instance().save_strategy(build_strategy());
+    status_label_->setText(tr("Saving strategy..."));
 }
 
-// ── on_error ─────────────────────────────────────────────────────────────────
+void StrategyBuilderPanel::on_backtest() {
+    // Backtesting is non-persisting, so it needs no name — only valid rules and
+    // a sane date range. (Save/Deploy still require a name.)
+    if (bt_start_date_->date() >= bt_end_date_->date()) {
+        status_label_->setText(tr("Start date must be before end date."));
+        return;
+    }
+    if (const QString err = validate(); !err.isEmpty()) {
+        validation_banner_->setText(err);
+        validation_banner_->setVisible(true);
+        return;
+    }
+    validation_banner_->setVisible(false);
+
+    // Backtest the current UI state directly, without persisting — backtesting is
+    // non-mutating; the user saves explicitly via Save. (Avoids silently rewriting
+    // library rows / bumping updated_at on every run.)
+    auto strat = build_strategy();
+
+    QString symbol = symbol_combo_->currentText().trimmed();
+    if (symbol.isEmpty()) symbol = QStringLiteral("RELIANCE");
+
+    services::algo::AlgoTradingService::instance().run_backtest(
+        strat, symbol, bt_start_date_->date().toString(QStringLiteral("yyyy-MM-dd")),
+        bt_end_date_->date().toString(QStringLiteral("yyyy-MM-dd")), bt_capital_->value());
+    status_label_->setText(tr("Running backtest..."));
+}
+
+void StrategyBuilderPanel::on_deploy() {
+    // Guards use a visible dialog/banner: the status label lives in the right-hand
+    // backtest card, far from the Deploy button, so a silent setText() there reads
+    // as "Deploy did nothing".
+    if (name_edit_->text().trimmed().isEmpty()) {
+        QMessageBox::warning(this, tr("Deploy"),
+                             tr("Enter a strategy name before deploying."));
+        name_edit_->setFocus();
+        return;
+    }
+    if (const QString err = validate(); !err.isEmpty()) {
+        validation_banner_->setText(err);
+        validation_banner_->setVisible(true);
+        return;
+    }
+    validation_banner_->setVisible(false);
+
+    // Build strategy from current UI state
+    auto strat = build_strategy();
+
+    auto* dialog = new AlgoDeployDialog(strat, this);
+    dialog->set_symbol(symbol_combo_->currentText()); // carry the builder's symbol in
+    if (instrument_type_combo_ && instrument_type_combo_->currentData().toString() != QLatin1String("equity")) {
+        dialog->set_fno_context(instrument_type_combo_->currentData().toString(),
+                                underlying_combo_ ? underlying_combo_->currentText() : QString(),
+                                expiry_mode_combo_ ? expiry_mode_combo_->currentData().toString() : QString());
+    }
+    if (dialog->exec() == QDialog::Accepted) {
+        auto deployment = dialog->deployment();
+        deployment.quantity = risk_panel_->quantity();
+        deployment.max_order_value = risk_panel_->max_order_value();
+
+        // Sanity check (non-blocking, bounded): warn if a rule can't fire at the
+        // current price — e.g. 'crosses_above 280.45' on a stock trading at 1204.
+        const double cur_price = fetch_quote_ltp(deployment.broker_id, deployment.broker_account_id,
+                                                 deployment.symbol, 2500);
+        if (cur_price > 0) {
+            QStringList warns;
+            scan_unreachable(strat.entry_conditions, tr("Entry"), cur_price, warns);
+            scan_unreachable(strat.exit_conditions, tr("Exit"), cur_price, warns);
+            if (!warns.isEmpty()) {
+                const auto btn = QMessageBox::warning(
+                    this, tr("Deploy — check conditions"),
+                    tr("%1 is at %2, but some rules may never trigger:\n\n%3\n\nDeploy anyway?")
+                        .arg(deployment.symbol).arg(cur_price, 0, 'f', 2).arg(warns.join("\n\n")),
+                    QMessageBox::Yes | QMessageBox::Cancel, QMessageBox::Cancel);
+                if (btn != QMessageBox::Yes) {
+                    dialog->deleteLater();
+                    return;
+                }
+            }
+        }
+
+        // Confirm before deploying an exact duplicate of an already-running setup.
+        if (algo_ns::AlgoEngine::instance().has_active_duplicate(
+                deployment.strategy_id, deployment.symbol, deployment.mode, deployment.entry_side)) {
+            const auto btn = QMessageBox::question(
+                this, tr("Already deployed"),
+                tr("An identical deployment is already running:\n\n%1 · %2 · %3 · %4\n\n"
+                   "Deploy another copy anyway?")
+                    .arg(deployment.strategy_name, deployment.symbol, deployment.mode.toUpper(),
+                         deployment.entry_side),
+                QMessageBox::Yes | QMessageBox::Cancel, QMessageBox::Cancel);
+            if (btn != QMessageBox::Yes) {
+                dialog->deleteLater();
+                return;
+            }
+        }
+
+        // Save strategy first
+        services::algo::AlgoTradingService::instance().save_strategy(strat);
+
+        LOG_INFO("AlgoTrading",
+                 QString("Deploy requested: id=%1 strategy='%2' symbol=%3 mode=%4 backend=%5 "
+                         "broker=%6 acct=%7 qty=%8")
+                     .arg(deployment.id, strat.name, deployment.symbol, deployment.mode,
+                          deployment.backend, deployment.broker_id, deployment.broker_account_id)
+                     .arg(deployment.quantity));
+
+        // Deploy via C++ engine (persists the row, then starts the runner). Feedback
+        // is the jump to the Dashboard below — NOT a label on the backtest card, which
+        // is unrelated to deployment and read as "stuck on Deploying…".
+        algo_ns::AlgoEngine::instance().start_deployment(deployment, strat);
+
+        // Tell the parent screen to switch to the Dashboard and refresh.
+        emit deployed();
+    }
+    dialog->deleteLater();
+}
+
+void StrategyBuilderPanel::load_template(int index) {
+    const auto tpls = services::algo::algo_strategy_templates();
+    const int i = index - 1; // index 0 is the "Templates…" placeholder
+    if (i < 0 || i >= tpls.size())
+        return;
+    const auto& t = tpls[i];
+
+    loaded_strategy_id_.clear(); // a template seeds a brand-new strategy
+    name_edit_->setText(t.name);
+    desc_edit_->setText(t.description);
+    timeframe_combo_->setCurrentText(t.timeframe);
+    entry_section_->set_conditions(t.entry, t.entry_logic);
+    exit_section_->set_conditions(t.exit, t.exit_logic);
+    risk_panel_->set_values(t.stop_loss, t.take_profit, 0.0, 1.0, 0.0);
+    report_panel_->clear();
+    if (state_chip_) state_chip_->setText(tr("NEW DRAFT"));
+    status_label_->setText(tr("Loaded template: %1").arg(t.name));
+    template_combo_->setCurrentIndex(0); // reset to placeholder
+}
+
+void StrategyBuilderPanel::load_strategy(const services::algo::AlgoStrategy& s) {
+    loaded_strategy_id_ = s.id; // keep id → Save updates this strategy in place
+    name_edit_->setText(s.name);
+    desc_edit_->setText(s.description);
+    timeframe_combo_->setCurrentText(s.timeframe.isEmpty() ? QStringLiteral("5m") : s.timeframe);
+    entry_section_->set_conditions(s.entry_conditions, s.entry_logic.isEmpty() ? QStringLiteral("AND") : s.entry_logic);
+    exit_section_->set_conditions(s.exit_conditions, s.exit_logic.isEmpty() ? QStringLiteral("AND") : s.exit_logic);
+    risk_panel_->set_values(s.stop_loss, s.take_profit, s.trailing_stop, 1.0, 0.0,
+                            s.position_size_pct > 0 ? s.position_size_pct : 100.0);
+    // P2.3: restore instrument type and F&O leg rules
+    if (instrument_type_combo_) {
+        const int idx = instrument_type_combo_->findData(s.instrument_type.isEmpty()
+                                                             ? QStringLiteral("equity") : s.instrument_type);
+        {
+            QSignalBlocker blocker(instrument_type_combo_);
+            instrument_type_combo_->setCurrentIndex(idx >= 0 ? idx : 0);
+        }
+    }
+    if (leg_editor_)
+        leg_editor_->set_legs(fincept::algo::fno::fno_legs_from_json(s.legs));
+    on_instrument_type_changed();
+    // Size the backtest range to the strategy's timeframe (daily needs years for
+    // long indicators; intraday must stay under Yahoo's history cap).
+    const QDate today = QDate::currentDate();
+    bt_start_date_->setDate(today.addDays(-services::algo::algo_default_lookback_days(s.timeframe)));
+    bt_end_date_->setDate(today);
+    report_panel_->clear();
+    validation_banner_->setVisible(false);
+    if (state_chip_) state_chip_->setText(tr("EDITING"));
+    status_label_->setText(tr("Editing: %1").arg(s.name));
+}
+
+void StrategyBuilderPanel::load_and_backtest(const services::algo::AlgoStrategy& s,
+                                             const QString& symbol, const QString& start_date,
+                                             const QString& end_date) {
+    load_strategy(s);
+    if (!symbol.isEmpty())
+        symbol_combo_->setCurrentText(symbol);
+    const QDate sd = QDate::fromString(start_date, QStringLiteral("yyyy-MM-dd"));
+    const QDate ed = QDate::fromString(end_date, QStringLiteral("yyyy-MM-dd"));
+    if (sd.isValid())
+        bt_start_date_->setDate(sd);
+    if (ed.isValid())
+        bt_end_date_->setDate(ed);
+    on_backtest(); // reuses validation + service call; report renders in the right panel
+}
+
+QString StrategyBuilderPanel::validate() const {
+    if (entry_section_->conditions().isEmpty())
+        return tr("Add at least one entry condition.");
+    const bool no_exit = exit_section_->conditions().isEmpty();
+    if (no_exit && risk_panel_->stop_loss() <= 0.0 && risk_panel_->take_profit() <= 0.0)
+        return tr("Strategy never exits: add an exit condition or set a stop-loss / take-profit.");
+    return QString();
+}
+
+void StrategyBuilderPanel::on_backtest_result(const QJsonObject& payload) {
+    status_label_->setText(tr("Backtest complete."));
+    display_backtest_result(payload);
+    LOG_INFO("AlgoTrading", "Backtest result displayed");
+}
 
 void StrategyBuilderPanel::on_error(const QString& context, const QString& msg) {
-    if (status_label_) {
-        status_label_->setText(QString("Error [%1]: %2").arg(context, msg));
-        status_label_->setStyleSheet(
-            QString("color: %1; font-size: %2px; %3 background: transparent; border: none;")
-                .arg(fincept::ui::colors::NEGATIVE())
-                .arg(fincept::ui::fonts::SMALL)
-                .arg(kMonoFont()));
-    }
+    status_label_->setText(QStringLiteral("[%1] %2").arg(context, msg));
+}
+
+void StrategyBuilderPanel::display_backtest_result(const QJsonObject& payload) {
+    report_panel_->set_result(payload);
+}
+
+void StrategyBuilderPanel::clear_results() {
+    report_panel_->clear();
+}
+
+QVariantMap StrategyBuilderPanel::save_draft() const {
+    QVariantMap draft;
+    draft["id"] = loaded_strategy_id_;
+    draft["name"] = name_edit_->text();
+    draft["description"] = desc_edit_->text();
+    draft["symbol"] = symbol_combo_->currentText();
+    draft["timeframe"] = timeframe_combo_->currentText();
+    draft["entry_conditions"] = QJsonDocument(entry_section_->conditions()).toJson(QJsonDocument::Compact);
+    draft["exit_conditions"] = QJsonDocument(exit_section_->conditions()).toJson(QJsonDocument::Compact);
+    draft["entry_logic"] = entry_section_->combined_logic();
+    draft["exit_logic"] = exit_section_->combined_logic();
+    draft["stop_loss"] = risk_panel_->stop_loss();
+    draft["take_profit"] = risk_panel_->take_profit();
+    draft["trailing_stop"] = risk_panel_->trailing_stop();
+    draft["quantity"] = risk_panel_->quantity();
+    draft["max_order_value"] = risk_panel_->max_order_value();
+    draft["capital_pct"] = risk_panel_->capital_pct();
+    return draft;
+}
+
+void StrategyBuilderPanel::restore_draft(const QVariantMap& draft) {
+    loaded_strategy_id_ = draft.value("id").toString();
+    name_edit_->setText(draft.value("name").toString());
+    desc_edit_->setText(draft.value("description").toString());
+    symbol_combo_->setCurrentText(draft.value("symbol").toString());
+    timeframe_combo_->setCurrentText(draft.value("timeframe", "5m").toString());
+
+    auto entry_json = QJsonDocument::fromJson(draft.value("entry_conditions").toByteArray()).array();
+    auto exit_json = QJsonDocument::fromJson(draft.value("exit_conditions").toByteArray()).array();
+    entry_section_->set_conditions(entry_json, draft.value("entry_logic", "AND").toString());
+    exit_section_->set_conditions(exit_json, draft.value("exit_logic", "AND").toString());
+
+    risk_panel_->set_values(
+        draft.value("stop_loss", 2.0).toDouble(),
+        draft.value("take_profit", 5.0).toDouble(),
+        draft.value("trailing_stop", 0.0).toDouble(),
+        draft.value("quantity", 1.0).toDouble(),
+        draft.value("max_order_value", 0.0).toDouble(),
+        draft.value("capital_pct", 100.0).toDouble());
+}
+
+// ── Live language switch ──────────────────────────────────────────────────────
+
+void StrategyBuilderPanel::changeEvent(QEvent* event) {
+    if (event->type() == QEvent::LanguageChange)
+        retranslateUi();
+    QWidget::changeEvent(event);
+}
+
+void StrategyBuilderPanel::retranslateUi() {
+    if (name_edit_) name_edit_->setPlaceholderText(tr("Strategy Name"));
+    if (desc_edit_) desc_edit_->setPlaceholderText(tr("Description (optional)"));
+
+    // template_combo_ item 0 is the "Templates…" placeholder; rest are data names.
+    if (template_combo_ && template_combo_->count() > 0)
+        template_combo_->setItemText(0, tr("Templates…"));
+
+    if (save_btn_)     save_btn_->setText(tr("Save"));
+    if (backtest_btn_) backtest_btn_->setText(tr("▶  RUN BACKTEST"));
+    if (deploy_btn_)   deploy_btn_->setText(tr("Deploy ▸"));
+
+    if (bt_header_)        bt_header_->setText(tr("BACKTEST SETUP"));
+    if (bt_symbol_label_)  bt_symbol_label_->setText(tr("Symbol"));
+    if (bt_capital_label_) bt_capital_label_->setText(tr("Capital"));
+    if (bt_start_label_)   bt_start_label_->setText(tr("From"));
+    if (bt_end_label_)     bt_end_label_->setText(tr("To"));
+    if (results_header_)   results_header_->setText(tr("RESULTS"));
+    // status_label_ carries transient action feedback — left as-is on language switch.
+    // Child widgets (ConditionSection / RiskManagementPanel / BacktestReportPanel)
+    // own their own retranslate via their changeEvent overrides.
 }
 
 } // namespace fincept::screens

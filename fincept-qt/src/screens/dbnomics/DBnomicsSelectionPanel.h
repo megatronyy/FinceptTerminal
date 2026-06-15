@@ -2,6 +2,7 @@
 #pragma once
 #include "services/dbnomics/DBnomicsModels.h"
 
+#include <QEvent>
 #include <QLabel>
 #include <QLineEdit>
 #include <QListWidget>
@@ -32,6 +33,13 @@ class DBnomicsSelectionPanel : public QWidget {
     QString selected_dataset() const { return selected_dataset_; }
     QString selected_series() const { return selected_series_; }
 
+    QString global_search_text() const;
+    QString provider_filter_text() const;
+    QString series_search_text() const;
+    void set_global_search_text(const QString& t);
+    void set_provider_filter_text(const QString& t);
+    void set_series_search_text(const QString& t);
+
   signals:
     void provider_selected(const QString& code);
     void dataset_selected(const QString& code);
@@ -60,8 +68,12 @@ class DBnomicsSelectionPanel : public QWidget {
     void remove_comparison_slot(int index);
     void clear_slots();
 
+  protected:
+    void changeEvent(QEvent* event) override;
+
   private:
     void build_ui();
+    void retranslateUi();
     void tick_anim();
     QWidget* build_search_section();
     QWidget* build_provider_section();
@@ -86,6 +98,16 @@ class DBnomicsSelectionPanel : public QWidget {
     QLabel* status_label_ = nullptr;
     QVBoxLayout* slots_layout_ = nullptr;
     int slot_count_ = 0;
+
+    // Section labels + action buttons (cached for retranslateUi)
+    QLabel* search_section_lbl_ = nullptr;
+    QLabel* provider_section_lbl_ = nullptr;
+    QLabel* dataset_section_lbl_ = nullptr;
+    QLabel* series_section_lbl_ = nullptr;
+    QLabel* comparison_section_lbl_ = nullptr;
+    QPushButton* add_single_btn_ = nullptr;
+    QPushButton* clear_all_btn_ = nullptr;
+    QPushButton* add_slot_btn_ = nullptr;
 
     QString selected_provider_;
     QString selected_dataset_;

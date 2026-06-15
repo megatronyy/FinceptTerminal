@@ -1,6 +1,7 @@
 #include "trading/brokers/fivepaisa/FivePaisaBroker.h"
 
 #include "trading/brokers/BrokerHttp.h"
+#include "trading/brokers/BrokerTokenUtil.h"
 
 #include <QDateTime>
 #include <QJsonArray>
@@ -205,7 +206,10 @@ TokenExchangeResponse FivePaisaBroker::exchange_token(const QString& api_key, co
             return {false, "", "", "", msg.isEmpty() ? "No AccessToken in response" : msg, ""};
         }
 
-        return {true, access_token, kp.client_id, "", "", ""};
+        // 5paisa access tokens expire at the daily reset. The live TOTP is a
+        // one-time code we can't replay, so there is no silent refresh.
+        const QString extra = with_token_expiry({}, next_ist_flush_epoch(6, 0));
+        return {true, access_token, kp.client_id, "", extra, ""};
     }
 }
 
@@ -476,6 +480,7 @@ ApiResponse<QVector<BrokerPosition>> FivePaisaBroker::get_positions(const Broker
         pos.avg_price = p["AvgRate"].toDouble();
         pos.ltp = p["LTP"].toDouble();
         pos.pnl = p["MTOM"].toDouble();
+        pos.pnl_pct = (pos.avg_price > 0.0) ? ((pos.ltp - pos.avg_price) / pos.avg_price) * 100.0 : 0.0;
         pos.product_type = product;
         positions.append(pos);
     }
@@ -515,7 +520,10 @@ ApiResponse<QVector<BrokerHolding>> FivePaisaBroker::get_holdings(const BrokerCr
         holding.quantity = qty;
         holding.avg_price = avg;
         holding.ltp = ltp;
+        holding.invested_value = qty * avg;
+        holding.current_value = qty * ltp;
         holding.pnl = (ltp - avg) * qty;
+        holding.pnl_pct = (holding.invested_value > 0.0) ? (holding.pnl / holding.invested_value) * 100.0 : 0.0;
         holdings.append(holding);
     }
 
@@ -685,6 +693,17 @@ ApiResponse<QVector<BrokerCandle>> FivePaisaBroker::get_history(const BrokerCred
     }
 
     return {true, result, "", ts};
+}
+
+// ============================================================================
+// Pre-trade margin calculator — fallback estimator.
+// 5Paisa has no position-specific margin calculator API (OpenAlgo's
+// broker/fivepaisa/api/margin_api.py raises NotImplementedError), so we use the
+// shared heuristic estimator (BrokerInterface.h::estimate_order_margin).
+// ============================================================================
+ApiResponse<OrderMargin> FivePaisaBroker::get_order_margins(const BrokerCredentials& /*creds*/,
+                                                            const UnifiedOrder& order) {
+    return {true, estimate_order_margin(order), "", now_ts()};
 }
 
 } // namespace fincept::trading

@@ -2,6 +2,8 @@
 
 #include "core/events/EventBus.h"
 #include "core/logging/Logger.h"
+#include "services/backtesting/BacktestingService.h"
+#include "services/cloud/CloudSyncEngine.h"
 #include "core/session/ScreenStateManager.h"
 #include "core/symbol/SymbolContext.h"
 #include "core/symbol/SymbolDragSource.h"
@@ -114,6 +116,15 @@ WatchlistScreen::WatchlistScreen(QWidget* parent) : QWidget(parent) {
     connect(&ThemeManager::instance(), &ThemeManager::theme_changed, this,
             [this](const ThemeTokens&) { refresh_theme(); });
     refresh_theme();
+
+    // Reload from the local cache when a cloud pull updates watchlists.
+    connect(&fincept::services::cloud::CloudSyncEngine::instance(),
+            &fincept::services::cloud::CloudSyncEngine::cloud_data_changed, this, [this](const QString& entity) {
+                if (entity == QLatin1String("watchlist")) {
+                    load_watchlists();
+                    load_stocks();
+                }
+            });
 }
 
 void WatchlistScreen::showEvent(QShowEvent* event) {
@@ -121,6 +132,8 @@ void WatchlistScreen::showEvent(QShowEvent* event) {
     if (!current_wl_id_.isEmpty() && !stocks_.isEmpty())
         hub_resubscribe_stocks();
     subscribe_mcp_events();
+    // Rate-gated pull of cloud watchlists on screen entry (no-op when sync is off).
+    fincept::services::cloud::CloudSyncEngine::instance().request_pull(QStringLiteral("watchlist"));
 }
 
 void WatchlistScreen::hideEvent(QHideEvent* event) {
@@ -307,6 +320,19 @@ QWidget* WatchlistScreen::build_main_panel() {
     connect(export_csv_btn_, &QPushButton::clicked, this, &WatchlistScreen::on_export_csv);
     export_csv_btn_->setEnabled(false);
     tl->addWidget(export_csv_btn_);
+
+    auto* backtest_btn = new QPushButton(tr("BACKTEST"));
+    connect(backtest_btn, &QPushButton::clicked, this, [this]() {
+        if (stocks_.isEmpty()) return;
+        QJsonArray symbols;
+        for (const auto& s : stocks_)
+            symbols.append(s.symbol);
+        QJsonObject config;
+        config["symbols"] = symbols;
+        services::backtest::BacktestingService::instance().set_pending_portfolio_config(config);
+        EventBus::instance().publish("nav.switch_screen", {{"screen_id", QString("backtesting")}});
+    });
+    tl->addWidget(backtest_btn);
 
     lay->addWidget(top_bar_);
 

@@ -15,6 +15,7 @@ class IIFLBroker : public IBroker {
     BrokerId id() const override { return BrokerId::IIFL; }
     const char* name() const override { return "IIFL"; }
     const char* base_url() const override { return "https://ttblaze.iifl.com/interactive"; }
+    const char* ws_adapter_name() const override { return "iifl"; }
 
     BrokerProfile profile() const override {
         return BrokerProfile{
@@ -49,6 +50,11 @@ class IIFLBroker : public IBroker {
 
     TokenExchangeResponse exchange_token(const QString& api_key, const QString& api_secret,
                                          const QString& auth_code) override;
+
+    // XTS tokens are minted from stored appKey/secret pairs — silently re-mintable.
+    bool supports_silent_refresh() const override { return true; }
+    TokenExchangeResponse refresh_session(const BrokerCredentials& creds) override;
+
     OrderPlaceResponse place_order(const BrokerCredentials& creds, const UnifiedOrder& order) override;
     ApiResponse<QJsonObject> modify_order(const BrokerCredentials& creds, const QString& order_id,
                                           const QJsonObject& mods) override;
@@ -66,6 +72,9 @@ class IIFLBroker : public IBroker {
 
     static bool is_token_expired(const BrokerHttpResponse& resp);
     static QString checked_error(const BrokerHttpResponse& resp, const QString& fallback);
+
+    // --- Margin Calculator --- IIFL (XTS) has no margin calculator API → fallback estimator.
+    ApiResponse<OrderMargin> get_order_margins(const BrokerCredentials& creds, const UnifiedOrder& order) override;
 
   protected:
     QMap<QString, QString> auth_headers(const BrokerCredentials& creds) const override;

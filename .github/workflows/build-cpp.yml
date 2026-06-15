@@ -7,7 +7,10 @@ on:
 env:
   BUILD_TYPE: Release
   QT_VERSION: "6.8.3"
-  QT_MODULES: "qtcharts qtwebsockets qtmultimedia"
+  # qtserialport: the qtpositioning NMEA plugin (libqtposition_nmea) links
+  # Qt6SerialPort; without it linuxdeploy/macdeployqt/windeployqt fail resolving
+  # libQt6SerialPort. The app doesn't use serial GPS — this just satisfies deploy.
+  QT_MODULES: "qtcharts qtwebsockets qtmultimedia qtwebengine qtwebchannel qtpositioning qtserialport"
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 jobs:
@@ -108,21 +111,45 @@ jobs:
           echo "CC=gcc-12"  >> "$GITHUB_ENV"
           echo "CXX=g++-12" >> "$GITHUB_ENV"
 
-      # ---- OpenSSL dev libs (Windows) ----
+      # ---- OpenSSL + zlib dev libs (Windows) ----
       # windows-2022 runners ship only the "Light" OpenSSL (no .lib files).
       # vcpkg is pre-installed on every windows-2022 runner at C:\vcpkg.
-      - name: Install OpenSSL (Windows)
+      # zlib is required by find_package(ZLIB) (InstrumentDecompress.cpp).
+      - name: Install OpenSSL + zlib (Windows)
         if: runner.os == 'Windows'
         shell: bash
         run: |
           set -euo pipefail
+          # zlib is linked STATICALLY (x64-windows-static-md). See release.yml's
+          # "Install OpenSSL + zlib" step for the full history: v4.1.0 shipped an
+          # exe importing an unbundled "z.dll" because ZLIB_ROOT was built from
+          # VCPKG_INSTALLATION_ROOT (backslashes, e.g. C:\vcpkg), which mangled
+          # the path FindZLIB consumed and let the link fall through to a stray
+          # system zlib named z.dll. Fix: normalise slashes + static zlib + pass
+          # ZLIB_ROOT/ZLIB_USE_STATIC_LIBS as -D cache vars at configure.
           VCPKG_ROOT="${VCPKG_INSTALLATION_ROOT:-C:/vcpkg}"
+          VCPKG_ROOT="${VCPKG_ROOT//\\//}"   # backslashes -> forward slashes (the v4.1.0 bug)
           echo "Using vcpkg at: $VCPKG_ROOT"
-          "$VCPKG_ROOT/vcpkg" install openssl:x64-windows --no-print-usage
+          "$VCPKG_ROOT/vcpkg" install openssl:x64-windows zlib:x64-windows-static-md --no-print-usage
           OPENSSL_DIR="$VCPKG_ROOT/installed/x64-windows"
+          ZLIB_DIR="$VCPKG_ROOT/installed/x64-windows-static-md"
           echo "OPENSSL_ROOT_DIR=$OPENSSL_DIR" >> "$GITHUB_ENV"
-          echo "OpenSSL installed at: $OPENSSL_DIR"
+          echo "ZLIB_ROOT=$ZLIB_DIR" >> "$GITHUB_ENV"
+          echo "OpenSSL installed at: $OPENSSL_DIR ; static zlib at: $ZLIB_DIR"
           ls "$OPENSSL_DIR/lib/libcrypto.lib" && echo "libcrypto.lib confirmed"
+          # vcpkg's static-md zlib ships the archive as "zs.lib", which stock
+          # CMake FindZLIB does not search for. Alias it to "zlib.lib" (a name
+          # FindZLIB looks for) so find_package(ZLIB) links the static archive.
+          if [ ! -f "$ZLIB_DIR/lib/zlib.lib" ]; then
+            ALT="$(ls "$ZLIB_DIR"/lib/z*.lib 2>/dev/null | head -1 || true)"
+            if [ -n "$ALT" ]; then cp "$ALT" "$ZLIB_DIR/lib/zlib.lib"; echo "Aliased $(basename "$ALT") -> zlib.lib"; fi
+          fi
+          if [ ! -f "$ZLIB_DIR/lib/zlib.lib" ]; then
+            echo "::error::static zlib archive not found in $ZLIB_DIR/lib"
+            ls -la "$ZLIB_DIR/lib/" 2>&1 || true
+            exit 1
+          fi
+          echo "static zlib confirmed: $ZLIB_DIR/lib/zlib.lib"
 
       # ---- Qt6 target (Windows/macOS) ----
       - name: Install Qt6
@@ -148,6 +175,11 @@ jobs:
           set-env: false
           dir: "${{ runner.temp }}/qt-host"
 
+      # ---- yt-dlp (bundled for dashboard video playback) ----
+      - name: Install yt-dlp
+        shell: bash
+        run: pip install yt-dlp
+
       # ---- Configure CMake ----
       - name: Configure CMake (Linux)
         if: runner.os == 'Linux'
@@ -157,6 +189,7 @@ jobs:
             -DCMAKE_BUILD_TYPE=${{ env.BUILD_TYPE }} \
             -DCMAKE_C_COMPILER_LAUNCHER=ccache \
             -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
+            -DFINCEPT_REQUIRE_BUNDLED_YTDLP=ON \
             ${{ matrix.cmake_extra }}
 
       - name: Configure CMake (Windows x64 / macOS x64 / macOS arm64)
@@ -168,10 +201,18 @@ jobs:
           if [ -n "${OPENSSL_ROOT_DIR:-}" ]; then
             OPENSSL_ARG="-DOPENSSL_ROOT_DIR=${OPENSSL_ROOT_DIR}"
           fi
+          # ZLIB_ROOT is set only on Windows (static zlib via vcpkg); on macOS it
+          # is empty so find_package(ZLIB) uses the system zlib as before.
+          ZLIB_ARG=""
+          if [ -n "${ZLIB_ROOT:-}" ]; then
+            ZLIB_ARG="-DZLIB_ROOT=${ZLIB_ROOT} -DZLIB_USE_STATIC_LIBS=ON"
+          fi
           cmake -B build \
             -DCMAKE_BUILD_TYPE=${{ env.BUILD_TYPE }} \
             -DCMAKE_PREFIX_PATH="${QT_ROOT_DIR}" \
             ${OPENSSL_ARG} \
+            ${ZLIB_ARG} \
+            -DFINCEPT_REQUIRE_BUNDLED_YTDLP=ON \
             ${{ runner.os == 'macOS' && '-DCMAKE_C_COMPILER_LAUNCHER=ccache -DCMAKE_CXX_COMPILER_LAUNCHER=ccache' || '' }} \
             ${{ matrix.cmake_extra }}
 
@@ -185,12 +226,18 @@ jobs:
           if [ -n "${OPENSSL_ROOT_DIR:-}" ]; then
             OPENSSL_ARG="-DOPENSSL_ROOT_DIR=${OPENSSL_ROOT_DIR}"
           fi
+          ZLIB_ARG=""
+          if [ -n "${ZLIB_ROOT:-}" ]; then
+            ZLIB_ARG="-DZLIB_ROOT=${ZLIB_ROOT} -DZLIB_USE_STATIC_LIBS=ON"
+          fi
           cmake -B build \
             -DCMAKE_BUILD_TYPE=${{ env.BUILD_TYPE }} \
             -DCMAKE_PREFIX_PATH="${QT_ROOT_DIR}" \
             -DQT_HOST_PATH="${HOST_QT}" \
             -T ClangCL \
             ${OPENSSL_ARG} \
+            ${ZLIB_ARG} \
+            -DFINCEPT_REQUIRE_BUNDLED_YTDLP=ON \
             ${{ matrix.cmake_extra }}
 
       # ---- Build ----
@@ -301,6 +348,20 @@ jobs:
             if [ -f "${QT_BIN}/${ssl_dll}" ] && [ ! -f "dist/${ssl_dll}" ]; then
               cp "${QT_BIN}/${ssl_dll}" dist/
               echo "Copied ${ssl_dll}"
+            fi
+          done
+
+          # zlib — the app now links zlib STATICALLY (x64-windows-static-md), so
+          # there is no runtime zlib DLL to ship. This loop is a harmless fallback
+          # for any transitive dynamic-zlib need; ZLIB_ROOT is the static-md dir
+          # and has no bin/*.dll, so it normally copies nothing. See release.yml.
+          for zlib_dll in zlib1.dll; do
+            if [ -n "${ZLIB_ROOT:-}" ] && [ -f "${ZLIB_ROOT}/bin/${zlib_dll}" ] && [ ! -f "dist/${zlib_dll}" ]; then
+              cp "${ZLIB_ROOT}/bin/${zlib_dll}" dist/
+              echo "Copied ${zlib_dll}"
+            elif [ -f "${QT_BIN}/${zlib_dll}" ] && [ ! -f "dist/${zlib_dll}" ]; then
+              cp "${QT_BIN}/${zlib_dll}" dist/
+              echo "Copied ${zlib_dll}"
             fi
           done
 
@@ -544,8 +605,8 @@ jobs:
             <key>CFBundleIdentifier</key><string>com.fincept.terminal</string>
             <key>CFBundleName</key><string>FinceptTerminal</string>
             <key>CFBundlePackageType</key><string>APPL</string>
-            <key>CFBundleShortVersionString</key><string>4.0.3</string>
-            <key>CFBundleVersion</key><string>4.0.3</string>
+            <key>CFBundleShortVersionString</key><string>4.1.0</string>
+            <key>CFBundleVersion</key><string>4.1.0</string>
             <key>LSMinimumSystemVersion</key><string>13.0</string>
             <key>NSHighResolutionCapable</key><true/>
           </dict></plist>

@@ -179,10 +179,10 @@ MonitorPickerDialog::MonitorPickerDialog(QWidget* parent, QScreen* current) : QD
     vl->setContentsMargins(16, 14, 16, 14);
     vl->setSpacing(10);
 
-    auto* title = new QLabel(tr("Open new window on:"), this);
-    title->setStyleSheet(QStringLiteral("color: %1; font-size: 13px; font-weight: 600;")
+    title_label_ = new QLabel(tr("Open new window on:"), this);
+    title_label_->setStyleSheet(QStringLiteral("color: %1; font-size: 13px; font-weight: 600;")
                              .arg(QString(ui::colors::TEXT_PRIMARY())));
-    vl->addWidget(title);
+    vl->addWidget(title_label_);
 
     auto* map = new MonitorMapWidget(
         current,
@@ -191,17 +191,35 @@ MonitorPickerDialog::MonitorPickerDialog(QWidget* parent, QScreen* current) : QD
             accept();
         },
         this);
+    map_widget_ = map;
     vl->addWidget(map, /*stretch=*/1);
 
-    auto* hint = new QLabel(
+    hint_label_ = new QLabel(
         tr("★ = primary monitor.  Click a monitor to open the new window there."), this);
-    hint->setStyleSheet(QStringLiteral("color: %1; font-size: 10px;")
+    hint_label_->setStyleSheet(QStringLiteral("color: %1; font-size: 10px;")
                             .arg(QString(ui::colors::TEXT_SECONDARY())));
-    vl->addWidget(hint);
+    vl->addWidget(hint_label_);
 
     auto* bb = new QDialogButtonBox(QDialogButtonBox::Cancel, this);
     connect(bb, &QDialogButtonBox::rejected, this, &QDialog::reject);
     vl->addWidget(bb);
+}
+
+void MonitorPickerDialog::changeEvent(QEvent* event) {
+    if (event->type() == QEvent::LanguageChange)
+        retranslateUi();
+    QDialog::changeEvent(event);
+}
+
+void MonitorPickerDialog::retranslateUi() {
+    setWindowTitle(tr("Choose Monitor"));
+    if (title_label_) title_label_->setText(tr("Open new window on:"));
+    if (hint_label_)
+        hint_label_->setText(
+            tr("★ = primary monitor.  Click a monitor to open the new window there."));
+    // Force a repaint so the per-screen "CURRENT" overlay (painted via tr() in
+    // MonitorMapWidget::paintEvent) re-evaluates under the new language.
+    if (map_widget_) map_widget_->update();
 }
 
 QScreen* MonitorPickerDialog::pick(QWidget* parent, QScreen* current) {
@@ -209,8 +227,29 @@ QScreen* MonitorPickerDialog::pick(QWidget* parent, QScreen* current) {
     if (screens.size() <= 1)
         return screens.isEmpty() ? nullptr : screens.first();
 
+    // Re-entrancy guard. exec() below spins a NESTED event loop, and the
+    // secondary-instance relaunch path (InstanceLock::message_received →
+    // new_window_on_next_monitor → here) is a QUEUED signal, so it gets
+    // delivered *by that nested loop* while a picker is already open. Without
+    // this guard, every relaunch stacks another modal picker on top of the
+    // current one; the user then dismisses them one by one and each dismissal
+    // spawns a window — looking like "the dialog won't close and keeps opening
+    // windows". exec() is GUI-thread only, so a function-static pointer is the
+    // right scope: surface the existing picker and drop the duplicate request
+    // instead of stacking. (The InstanceLock deferred-emit only fixed the
+    // crash this same re-entrancy used to cause, not the stacking.)
+    static MonitorPickerDialog* s_active = nullptr;
+    if (s_active) {
+        s_active->raise();
+        s_active->activateWindow();
+        return nullptr;
+    }
+
     MonitorPickerDialog dlg(parent, current);
-    if (dlg.exec() == QDialog::Accepted)
+    s_active = &dlg;
+    const int rc = dlg.exec();
+    s_active = nullptr;
+    if (rc == QDialog::Accepted)
         return dlg.picked_screen();
     return nullptr;
 }

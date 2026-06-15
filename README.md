@@ -1,3 +1,7 @@
+> [!IMPORTANT]
+> **Maintenance notice — June 2026**
+> Due to funding constraints, the public [Fincept Terminal](https://github.com/Fincept-Corporation/FinceptTerminal) is moving to **one update per month** and is **no longer maintained on a daily basis**. The team is now focused on a subscription-based **private edition** of the terminal and a new project, **[Quantcept](https://github.com/Fincept-Corporation/Quantcept)**. This open-source repo stays public and will not be deleted.
+
 # Fincept Terminal
 
 <div align="center">
@@ -65,13 +69,13 @@ State-of-the-art financial intelligence platform with institutional-grade financ
 <!-- DOWNLOAD-TABLE-START -->
 ### Option 1 — Download Installer (Recommended)
 
-Latest release: **v4.0.3** — [View all releases](https://github.com/Fincept-Corporation/FinceptTerminal/releases/tag/v4.0.3)
+Latest release: **v4.1.0** — [View all releases](https://github.com/Fincept-Corporation/FinceptTerminal/releases/tag/v4.1.0)
 
 | Platform | Download | Run |
 |----------|----------|-----|
-| **Windows x64** | [FinceptTerminal-Windows-x64-setup.exe](https://github.com/Fincept-Corporation/FinceptTerminal/releases/download/v4.0.3/FinceptTerminal-4.0.3-windows-x64-setup.exe) | Run installer → launch `FinceptTerminal.exe` |
-| **Linux x64** | [FinceptTerminal-Linux-x64.run](https://github.com/Fincept-Corporation/FinceptTerminal/releases/download/v4.0.3/FinceptTerminal-4.0.3-linux-x64-setup.run) | `chmod +x` → run installer |
-| **macOS Apple Silicon** | [FinceptTerminal-macOS-arm64.dmg](https://github.com/Fincept-Corporation/FinceptTerminal/releases/download/v4.0.3/FinceptTerminal-4.0.3-macos-arm64-setup.dmg) | Open DMG → drag to Applications |
+| **Windows x64** | [FinceptTerminal-Windows-x64-setup.exe](https://github.com/Fincept-Corporation/FinceptTerminal/releases/download/v4.1.0/FinceptTerminal-4.1.0-windows-x64-setup.exe) | Run installer → launch `FinceptTerminal.exe` |
+| **Linux x64** | [FinceptTerminal-Linux-x64.run](https://github.com/Fincept-Corporation/FinceptTerminal/releases/download/v4.1.0/FinceptTerminal-4.1.0-linux-x64-setup.run) | `chmod +x` → run installer |
+| **macOS Apple Silicon** | [FinceptTerminal-macOS-arm64.dmg](https://github.com/Fincept-Corporation/FinceptTerminal/releases/download/v4.1.0/FinceptTerminal-4.1.0-macos-arm64-setup.dmg) | Open DMG → drag to Applications |
 <!-- DOWNLOAD-TABLE-END -->
 
 ---

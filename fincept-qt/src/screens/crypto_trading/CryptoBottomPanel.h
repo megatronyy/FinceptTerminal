@@ -4,6 +4,7 @@
 #include "screens/crypto_trading/CryptoTypes.h"
 #include "trading/TradingTypes.h"
 
+#include <QEvent>
 #include <QJsonArray>
 #include <QLabel>
 #include <QStackedWidget>
@@ -50,11 +51,19 @@ class CryptoBottomPanel : public QWidget {
     /// Call at every WS flush tick.
     void update_position_prices(const QHash<QString, double>& last_prices);
 
+    void set_account_id(const QString& account_id);
+
   signals:
     void cancel_order_requested(const QString& order_id);
     void close_position_requested(const QString& symbol);
+    void cancel_all_orders_requested(const QString& account_id);
+    void close_all_positions_requested(const QString& account_id);
+
+  protected:
+    void changeEvent(QEvent* event) override;
 
   private:
+    void retranslateUi();
     void setup_positions_tab();
     void setup_orders_tab();
     void setup_trades_tab();
@@ -83,6 +92,24 @@ class CryptoBottomPanel : public QWidget {
     QStackedWidget* my_trades_stack_ = nullptr;
     QStackedWidget* fees_stack_ = nullptr;
 
+    // Empty-state placeholder labels (cached for retranslateUi)
+    QLabel* positions_empty_label_ = nullptr;
+    QLabel* orders_empty_label_ = nullptr;
+    QLabel* trades_empty_label_ = nullptr;
+    QLabel* my_trades_empty_label_ = nullptr;
+    QLabel* fees_empty_label_ = nullptr;
+
+    // Tab indices for the host containers (cached for retranslateUi tab text)
+    int positions_tab_idx_ = -1;
+    int orders_tab_idx_ = -1;
+    int trades_tab_idx_ = -1;
+    int my_trades_tab_idx_ = -1;
+    int fees_tab_idx_ = -1;
+    int time_sales_tab_idx_ = -1;
+    int depth_tab_idx_ = -1;
+    int market_tab_idx_ = -1;
+    int stats_tab_idx_ = -1;
+
     // Market Info
     QLabel* funding_label_ = nullptr;
     QLabel* mark_label_ = nullptr;
@@ -91,18 +118,32 @@ class CryptoBottomPanel : public QWidget {
     QLabel* fees_label_ = nullptr;
     QLabel* next_funding_label_ = nullptr;
 
+    // Market Info card title labels (cached for retranslateUi)
+    QLabel* funding_title_ = nullptr;
+    QLabel* mark_title_ = nullptr;
+    QLabel* index_title_ = nullptr;
+    QLabel* oi_title_ = nullptr;
+    QLabel* fees_title_ = nullptr;
+    QLabel* next_funding_title_ = nullptr;
+
     // Stats (data grid)
     QLabel* stat_values_[5] = {};
+    QLabel* stat_titles_[5] = {};
 
     // Live balance
     QLabel* live_balance_label_ = nullptr;
     QLabel* live_equity_label_ = nullptr;
     QLabel* live_margin_label_ = nullptr;
 
+    // Bulk action buttons
+    class QPushButton* cancel_all_btn_ = nullptr;
+    class QPushButton* close_all_btn_ = nullptr;
+
     // New widgets
     CryptoTimeSales* time_sales_ = nullptr;
     CryptoDepthChart* depth_chart_ = nullptr;
 
+    QString account_id_;
     bool is_paper_ = true;
 };
 

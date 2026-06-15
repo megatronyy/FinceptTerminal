@@ -1,6 +1,8 @@
 // CryptoWatchlist.cpp — compact watchlist, 3-column, no horizontal scroll
 #include "screens/crypto_trading/CryptoWatchlist.h"
 
+#include "core/symbol/SymbolDragSource.h"
+#include "core/symbol/SymbolRef.h"
 #include "ui/theme/Theme.h"
 
 #include <QHBoxLayout>
@@ -59,9 +61,9 @@ CryptoWatchlist::CryptoWatchlist(QWidget* parent) : QWidget(parent) {
     auto* header_layout = new QHBoxLayout(header_widget);
     header_layout->setContentsMargins(8, 0, 8, 0);
 
-    auto* header = new QLabel("WATCHLIST");
-    header->setObjectName("cryptoWatchlistTitle");
-    header_layout->addWidget(header);
+    title_label_ = new QLabel(tr("WATCHLIST"));
+    title_label_->setObjectName("cryptoWatchlistTitle");
+    header_layout->addWidget(title_label_);
     header_layout->addStretch();
 
     count_label_ = new QLabel("0/0");
@@ -72,7 +74,7 @@ CryptoWatchlist::CryptoWatchlist(QWidget* parent) : QWidget(parent) {
     // Search
     filter_edit_ = new QLineEdit;
     filter_edit_->setObjectName("cryptoWatchlistSearch");
-    filter_edit_->setPlaceholderText("Search...");
+    filter_edit_->setPlaceholderText(tr("Search..."));
     filter_edit_->setFixedHeight(24);
     connect(filter_edit_, &QLineEdit::textChanged, this, &CryptoWatchlist::on_filter_changed);
     layout->addWidget(filter_edit_);
@@ -82,7 +84,7 @@ CryptoWatchlist::CryptoWatchlist(QWidget* parent) : QWidget(parent) {
     table_ = new QTableWidget;
     table_->setObjectName("cryptoWatchlistTable");
     table_->setColumnCount(3);
-    table_->setHorizontalHeaderLabels({"Symbol", "Price", "%"});
+    table_->setHorizontalHeaderLabels({tr("Symbol"), tr("Price"), tr("%")});
     table_->horizontalHeader()->setSectionResizeMode(0, QHeaderView::Stretch);
     table_->horizontalHeader()->setSectionResizeMode(1, QHeaderView::Stretch);
     table_->horizontalHeader()->setSectionResizeMode(2, QHeaderView::Fixed);
@@ -98,6 +100,41 @@ CryptoWatchlist::CryptoWatchlist(QWidget* parent) : QWidget(parent) {
 
     connect(table_, &QTableWidget::cellClicked, this, &CryptoWatchlist::on_cell_clicked);
     layout->addWidget(table_, 1);
+
+    // Drag-out: hold-and-drag a pair row to ship it to any drop target — drop
+    // it on the pushpin bar at the top to pin + broadcast it, matching the
+    // standalone Watchlist tab and the equity watchlist. The ref MUST carry
+    // asset_class="crypto", or CryptoTradingScreen::on_group_symbol_changed
+    // drops it as a non-crypto symbol. The provider reads the row under the
+    // cursor at drag-start (the mouse press selects it first); the symbol is
+    // the cell text (col 0), like on_cell_clicked. Group None: the pushpin chip
+    // owns the broadcast group, so the source group is irrelevant here.
+    symbol_dnd::installDragSource(table_->viewport(), [this]() -> SymbolRef {
+        if (!table_)
+            return {};
+        const int r = table_->currentRow();
+        if (r < 0)
+            return {};
+        auto* item = table_->item(r, 0);
+        if (!item || item->text().isEmpty())
+            return {};
+        SymbolRef ref;
+        ref.symbol = item->text();
+        ref.asset_class = QStringLiteral("crypto");
+        return ref;
+    });
+}
+
+void CryptoWatchlist::changeEvent(QEvent* event) {
+    if (event->type() == QEvent::LanguageChange)
+        retranslateUi();
+    QWidget::changeEvent(event);
+}
+
+void CryptoWatchlist::retranslateUi() {
+    if (title_label_) title_label_->setText(tr("WATCHLIST"));
+    if (filter_edit_) filter_edit_->setPlaceholderText(tr("Search..."));
+    if (table_) table_->setHorizontalHeaderLabels({tr("Symbol"), tr("Price"), tr("%")});
 }
 
 void CryptoWatchlist::set_symbols(const QStringList& symbols) {

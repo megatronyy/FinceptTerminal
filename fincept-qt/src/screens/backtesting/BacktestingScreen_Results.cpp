@@ -20,6 +20,11 @@
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QRegularExpression>
+#include <QtCharts/QChart>
+#include <QtCharts/QChartView>
+#include <QtCharts/QDateTimeAxis>
+#include <QtCharts/QLineSeries>
+#include <QtCharts/QValueAxis>
 
 namespace fincept::screens {
 
@@ -35,6 +40,14 @@ void BacktestingScreen::clear_results() {
     trades_table_->setRowCount(0);
     trades_table_->setColumnCount(0);
     raw_json_edit_->clear();
+    if (equity_chart_tab_ && equity_chart_tab_->layout()) {
+        auto* layout = equity_chart_tab_->layout();
+        while (layout->count() > 0) {
+            auto* item = layout->takeAt(0);
+            if (item->widget()) item->widget()->deleteLater();
+            delete item;
+        }
+    }
 }
 
 void BacktestingScreen::display_result(const QString& command, const QJsonObject& payload) {
@@ -163,12 +176,12 @@ void BacktestingScreen::display_result(const QString& command, const QJsonObject
     // ── Header (per-command title) ──
     QString cmd_label = command.toUpper();
     for (const auto& c : commands_) if (c.id == command) { cmd_label = c.label.toUpper(); break; }
-    add_section_header(cmd_label + " RESULTS");
+    add_section_header(tr("%1 RESULTS").arg(cmd_label));
 
     // ── Synthetic-data warning (Python sets this when yfinance is unavailable) ──
     if (payload.value("usingSyntheticData").toBool()) {
         auto* warn = new QLabel(
-            "Using synthetic price data (yfinance unavailable). Results do not reflect real markets.",
+            tr("Using synthetic price data (yfinance unavailable). Results do not reflect real markets."),
             summary_container_);
         warn->setWordWrap(true);
         warn->setStyleSheet(QString("color:%1; font-size:%2px; font-family:%3; padding:8px 10px; "
@@ -189,7 +202,7 @@ void BacktestingScreen::display_result(const QString& command, const QJsonObject
                               "totalTrades", "volatility"});
         if (payload.contains("status")) {
             auto status = payload["status"].toString();
-            auto* sl = new QLabel(QString("Status: %1").arg(status), summary_container_);
+            auto* sl = new QLabel(tr("Status: %1").arg(status), summary_container_);
             sl->setStyleSheet(QString("color:%1; font-size:%2px; font-family:%3; padding:8px;")
                                   .arg(status == "success" ? ui::colors::POSITIVE() : ui::colors::WARNING())
                                   .arg(ui::fonts::SMALL)
@@ -198,7 +211,9 @@ void BacktestingScreen::display_result(const QString& command, const QJsonObject
         }
         fill_kv_table(perf);
         auto trades = payload.value("trades").toArray();
-        fill_details_table(trades);
+        fill_details_table(trades, {"symbol", "entryDate", "exitDate", "side",
+                                    "entryPrice", "exitPrice", "quantity",
+                                    "pnl", "pnlPercent", "holdingPeriod", "exitReason", "commission"});
     }
     else if (command == "optimize") {
         QJsonObject summary{
@@ -213,12 +228,12 @@ void BacktestingScreen::display_result(const QString& command, const QJsonObject
 
         auto best_params = payload.value("bestParameters").toObject();
         if (!best_params.isEmpty()) {
-            add_section_header("BEST PARAMETERS");
+            add_section_header(tr("BEST PARAMETERS"));
             add_cards_from(best_params, {}, 4);
         }
         auto best_perf = payload.value("bestPerformance").toObject();
         if (!best_perf.isEmpty()) {
-            add_section_header("BEST PERFORMANCE");
+            add_section_header(tr("BEST PERFORMANCE"));
             add_cards_from(best_perf, {"totalReturn", "sharpeRatio", "maxDrawdown",
                                        "winRate", "profitFactor", "totalTrades"});
             fill_kv_table(best_perf);
@@ -283,7 +298,7 @@ void BacktestingScreen::display_result(const QString& command, const QJsonObject
             } else {
                 flat = stats;
             }
-            add_section_header("STATISTICS");
+            add_section_header(tr("STATISTICS"));
             add_cards_from(flat, {"last", "mean", "std", "min", "max"});
             fill_kv_table(flat);
         }
@@ -338,7 +353,7 @@ void BacktestingScreen::display_result(const QString& command, const QJsonObject
 
         auto dist = payload.value("distribution").toObject();
         if (!dist.isEmpty()) {
-            add_section_header("CLASS DISTRIBUTION");
+            add_section_header(tr("CLASS DISTRIBUTION"));
             // Re-key so cards show "Class -1 / Class 0 / Class 1"
             QJsonObject relabeled;
             QStringList ordered;
@@ -347,7 +362,7 @@ void BacktestingScreen::display_result(const QString& command, const QJsonObject
                 return a.toInt() < b.toInt();
             });
             for (const auto& k : raw_keys) {
-                QString rk = "Class " + k;
+                QString rk = tr("Class %1").arg(k);
                 relabeled[rk] = dist.value(k);
                 ordered.append(rk);
             }
@@ -382,7 +397,7 @@ void BacktestingScreen::display_result(const QString& command, const QJsonObject
         // OR scattered at the top level for other shapes.
         auto stats = payload.value("stats").toObject();
         if (!stats.isEmpty()) {
-            add_section_header("STATISTICS");
+            add_section_header(tr("STATISTICS"));
             add_cards_from(stats, {"Total Return", "Annualized Return", "Sharpe Ratio",
                                    "Sortino Ratio", "Calmar Ratio", "Max Drawdown",
                                    "Annualized Volatility", "Downside Risk"});
@@ -481,6 +496,82 @@ void BacktestingScreen::display_result(const QString& command, const QJsonObject
 
     summary_layout_->addStretch();
 
+    // ── Equity Curve chart ──
+    auto equity_arr = payload.value("equity").toArray();
+    if (!equity_arr.isEmpty() && equity_chart_tab_ && equity_chart_tab_->layout()) {
+        auto* eq_series = new QLineSeries;
+        eq_series->setPen(QPen(QColor(accent), 1.5));
+        auto* dd_series = new QLineSeries;
+        dd_series->setPen(QPen(QColor(ui::colors::NEGATIVE()), 1.0));
+
+        double y_min = 1e18, y_max = -1e18;
+        double dd_min = 0;
+
+        for (const auto& pt : equity_arr) {
+            auto obj = pt.toObject();
+            auto date_str = obj.value("date").toString();
+            auto equity_val = obj.value("equity").toDouble();
+            auto dd_val = obj.value("drawdown").toDouble();
+            auto dt = QDateTime::fromString(date_str, "yyyy-MM-dd");
+            if (!dt.isValid()) dt = QDateTime::fromString(date_str, Qt::ISODate);
+            if (!dt.isValid()) continue;
+            qint64 ms = dt.toMSecsSinceEpoch();
+            eq_series->append(ms, equity_val);
+            dd_series->append(ms, dd_val * 100.0);
+            y_min = qMin(y_min, equity_val);
+            y_max = qMax(y_max, equity_val);
+            dd_min = qMin(dd_min, dd_val * 100.0);
+        }
+
+        if (eq_series->count() > 1) {
+            auto* chart = new QChart;
+            chart->addSeries(eq_series);
+            chart->legend()->setVisible(false);
+            chart->setMargins(QMargins(0, 0, 0, 0));
+            chart->setBackgroundBrush(QBrush(QColor(ui::colors::BG_BASE())));
+            chart->setPlotAreaBackgroundBrush(QBrush(QColor(ui::colors::BG_SURFACE())));
+            chart->setPlotAreaBackgroundVisible(true);
+
+            auto* x_axis = new QDateTimeAxis;
+            x_axis->setFormat("MMM yyyy");
+            x_axis->setLabelsColor(QColor(ui::colors::TEXT_TERTIARY()));
+            x_axis->setGridLineColor(QColor(ui::colors::BORDER_DIM()));
+            chart->addAxis(x_axis, Qt::AlignBottom);
+            eq_series->attachAxis(x_axis);
+
+            auto* y_axis = new QValueAxis;
+            double margin = (y_max - y_min) * 0.05;
+            y_axis->setRange(y_min - margin, y_max + margin);
+            y_axis->setLabelFormat(cur::symbol() + "%.0f");
+            y_axis->setLabelsColor(QColor(ui::colors::TEXT_TERTIARY()));
+            y_axis->setGridLineColor(QColor(ui::colors::BORDER_DIM()));
+            chart->addAxis(y_axis, Qt::AlignLeft);
+            eq_series->attachAxis(y_axis);
+
+            // Drawdown on right axis
+            if (dd_min < -0.01) {
+                chart->addSeries(dd_series);
+                auto* dd_axis = new QValueAxis;
+                dd_axis->setRange(dd_min * 1.2, 0);
+                dd_axis->setLabelFormat("%.1f%%");
+                dd_axis->setLabelsColor(QColor(ui::colors::NEGATIVE()));
+                dd_axis->setGridLineVisible(false);
+                chart->addAxis(dd_axis, Qt::AlignRight);
+                dd_series->attachAxis(x_axis);
+                dd_series->attachAxis(dd_axis);
+            } else {
+                delete dd_series;
+            }
+
+            auto* view = new QChartView(chart, equity_chart_tab_);
+            view->setRenderHint(QPainter::Antialiasing);
+            equity_chart_tab_->layout()->addWidget(view);
+        } else {
+            delete eq_series;
+            delete dd_series;
+        }
+    }
+
     // ── RAW JSON tab (always populated) ──
     raw_json_edit_->setPlainText(QJsonDocument(payload).toJson(QJsonDocument::Indented));
 
@@ -524,6 +615,12 @@ void BacktestingScreen::on_result(const QString& provider, const QString& comman
         strategy_category_combo_->blockSignals(false);
         populate_strategies();
         LOG_INFO("Backtesting", QString("[%1] Loaded %2 strategies").arg(provider).arg(strategies_.size()));
+        // A backtest auto-run was requested (e.g. from Equity Research) before
+        // strategies were ready — now that a strategy is selected, fire it.
+        if (pending_auto_run_) {
+            pending_auto_run_ = false;
+            trigger_auto_run();
+        }
         return;
     }
     if (command == "get_indicators") {
@@ -554,7 +651,7 @@ void BacktestingScreen::on_result(const QString& provider, const QString& comman
     // Regular command result — update run state and display
     is_running_ = false;
     run_button_->setEnabled(true);
-    set_status_state("READY", ui::colors::POSITIVE, "rgba(22,163,74,0.08)");
+    set_status_state(tr("READY"), ui::colors::POSITIVE, "rgba(22,163,74,0.08)");
     display_result(command, payload);
     LOG_INFO("Backtesting", QString("[%1/%2] Complete").arg(provider, command));
 }
@@ -596,7 +693,7 @@ void BacktestingScreen::on_command_options_loaded(const QString& provider, const
 void BacktestingScreen::on_error(const QString& context, const QString& message) {
     is_running_ = false;
     run_button_->setEnabled(true);
-    set_status_state("ERROR", ui::colors::NEGATIVE, "rgba(220,38,38,0.08)");
+    set_status_state(tr("ERROR"), ui::colors::NEGATIVE, "rgba(220,38,38,0.08)");
     display_error(QString("[%1] %2").arg(context, message));
 }
 

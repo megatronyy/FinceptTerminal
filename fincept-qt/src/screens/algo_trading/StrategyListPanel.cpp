@@ -1,14 +1,23 @@
 // src/screens/algo_trading/StrategyListPanel.cpp
 #include "screens/algo_trading/StrategyListPanel.h"
+#include "screens/algo_trading/AlgoDeployDialog.h"
 
+#include "algo_engine/AlgoEngine.h"
 #include "core/logging/Logger.h"
 #include "services/algo_trading/AlgoTradingService.h"
 #include "ui/theme/Theme.h"
 
 #include <algorithm>
 
+#include <QDate>
+#include <QDateEdit>
+#include <QDialog>
+#include <QDialogButtonBox>
+#include <QFormLayout>
 #include <QHeaderView>
 #include <QHBoxLayout>
+#include <QLineEdit>
+#include <QMessageBox>
 #include <QPushButton>
 #include <QScrollArea>
 #include <QTableWidgetItem>
@@ -31,6 +40,7 @@ StrategyListPanel::StrategyListPanel(QWidget* parent) : QWidget(parent) {
 void StrategyListPanel::connect_service() {
     auto& svc = AlgoTradingService::instance();
     connect(&svc, &AlgoTradingService::strategies_loaded, this, &StrategyListPanel::on_strategies_loaded);
+    connect(&svc, &AlgoTradingService::strategy_deleted, this, [&svc](const QString&) { svc.list_strategies(); });
     connect(&svc, &AlgoTradingService::error_occurred, this, &StrategyListPanel::on_error);
 }
 
@@ -53,7 +63,7 @@ void StrategyListPanel::build_ui() {
     top_hl->setSpacing(8);
 
     search_edit_ = new QLineEdit(top_bar);
-    search_edit_->setPlaceholderText("Search strategies...");
+    search_edit_->setPlaceholderText(tr("Search strategies..."));
     search_edit_->setFixedHeight(28);
     search_edit_->setStyleSheet(
         QString("QLineEdit { background:%1; border:1px solid %2; color:%3;"
@@ -68,7 +78,7 @@ void StrategyListPanel::build_ui() {
     cat_combo_ = new QComboBox(top_bar);
     cat_combo_->setFixedHeight(28);
     cat_combo_->setFixedWidth(150);
-    cat_combo_->addItem("All Categories");
+    cat_combo_->addItem(tr("All Categories"));
     const QString combo_style =
         QString("QComboBox { background:%1; color:%2; border:1px solid %3;"
                 " padding:2px 6px; font-size:%4px; font-family:%5; }"
@@ -82,22 +92,22 @@ void StrategyListPanel::build_ui() {
     top_hl->addWidget(cat_combo_);
 
     // Sort
-    auto* sort_lbl = new QLabel("SORT:", top_bar);
-    sort_lbl->setStyleSheet(QString("color:%1; font-size:%2px; font-weight:700; font-family:%3;"
-                                    " background:transparent; border:none;")
-                                .arg(colors::TEXT_TERTIARY())
-                                .arg(fonts::TINY)
-                                .arg(fonts::DATA_FAMILY()));
-    top_hl->addWidget(sort_lbl);
+    sort_caption_ = new QLabel(tr("SORT:"), top_bar);
+    sort_caption_->setStyleSheet(QString("color:%1; font-size:%2px; font-weight:700; font-family:%3;"
+                                         " background:transparent; border:none;")
+                                     .arg(colors::TEXT_TERTIARY())
+                                     .arg(fonts::TINY)
+                                     .arg(fonts::DATA_FAMILY()));
+    top_hl->addWidget(sort_caption_);
 
     sort_combo_ = new QComboBox(top_bar);
     sort_combo_->setFixedHeight(28);
     sort_combo_->setFixedWidth(120);
-    sort_combo_->addItems({"Name A→Z", "Name Z→A", "Category"});
+    sort_combo_->addItems({tr("Name A→Z"), tr("Name Z→A"), tr("Category")});
     sort_combo_->setStyleSheet(combo_style);
     top_hl->addWidget(sort_combo_);
 
-    count_label_ = new QLabel("0 strategies", top_bar);
+    count_label_ = new QLabel(tr("%1 strategies").arg(0), top_bar);
     count_label_->setStyleSheet(QString("color:%1; font-size:%2px; font-weight:700; font-family:%3;"
                                         " background:transparent; border:none;")
                                     .arg(colors::TEXT_SECONDARY())
@@ -109,24 +119,31 @@ void StrategyListPanel::build_ui() {
 
     // ── Table ────────────────────────────────────────────────────────────────
     table_ = new QTableWidget(this);
-    table_->setColumnCount(4); // #, NAME, CATEGORY, ID
-    table_->setHorizontalHeaderLabels({"#", "STRATEGY NAME", "CATEGORY", "ID"});
+    table_->setColumnCount(8); // #, NAME, CATEGORY, ID, EDIT, BACKTEST, DEPLOY, DELETE
+    table_->setHorizontalHeaderLabels(
+        {tr("#"), tr("STRATEGY NAME"), tr("CATEGORY"), tr("ID"), QString(), QString(), QString(), QString()});
     table_->verticalHeader()->setVisible(false);
     table_->setSelectionBehavior(QAbstractItemView::SelectRows);
     table_->setSelectionMode(QAbstractItemView::SingleSelection);
     table_->setEditTriggers(QAbstractItemView::NoEditTriggers);
     table_->setAlternatingRowColors(true);
-    table_->setSortingEnabled(false); // we sort ourselves
+    table_->setSortingEnabled(false);
     table_->setShowGrid(false);
     table_->setFocusPolicy(Qt::NoFocus);
     table_->horizontalHeader()->setSectionResizeMode(0, QHeaderView::Fixed);
     table_->horizontalHeader()->setSectionResizeMode(1, QHeaderView::Stretch);
     table_->horizontalHeader()->setSectionResizeMode(2, QHeaderView::Fixed);
     table_->horizontalHeader()->setSectionResizeMode(3, QHeaderView::Fixed);
+    table_->horizontalHeader()->setSectionResizeMode(4, QHeaderView::Fixed);
+    table_->horizontalHeader()->setSectionResizeMode(5, QHeaderView::Fixed);
     table_->setColumnWidth(0, 40);
-    table_->setColumnWidth(2, 180);
-    table_->setColumnWidth(3, 120);
-    table_->verticalHeader()->setDefaultSectionSize(26);
+    table_->setColumnWidth(2, 150);
+    table_->setColumnWidth(3, 100);
+    table_->setColumnWidth(4, 56);
+    table_->setColumnWidth(5, 76);
+    table_->setColumnWidth(6, 72);
+    table_->setColumnWidth(7, 66);
+    table_->verticalHeader()->setDefaultSectionSize(30);
     table_->setStyleSheet(
         QString("QTableWidget { background:%1; alternate-background-color:%2;"
                 " color:%3; border:none; font-size:%4px; font-family:%5; gridline-color:%6; }"
@@ -159,13 +176,13 @@ void StrategyListPanel::build_ui() {
             .arg(fonts::TINY)
             .arg(fonts::DATA_FAMILY(), colors::CYAN());
 
-    prev_btn_ = new QPushButton("◀ PREV", page_bar);
+    prev_btn_ = new QPushButton(tr("◀ PREV"), page_bar);
     prev_btn_->setFixedHeight(24);
     prev_btn_->setCursor(Qt::PointingHandCursor);
     prev_btn_->setStyleSheet(btn_style);
     page_hl->addWidget(prev_btn_);
 
-    page_label_ = new QLabel("Page 1 of 1", page_bar);
+    page_label_ = new QLabel(tr("Page %1 of %2").arg(1).arg(1), page_bar);
     page_label_->setStyleSheet(QString("color:%1; font-size:%2px; font-weight:700; font-family:%3;"
                                        " background:transparent; border:none;")
                                    .arg(colors::TEXT_SECONDARY())
@@ -174,7 +191,7 @@ void StrategyListPanel::build_ui() {
     page_label_->setAlignment(Qt::AlignCenter);
     page_hl->addWidget(page_label_, 1);
 
-    next_btn_ = new QPushButton("NEXT ▶", page_bar);
+    next_btn_ = new QPushButton(tr("NEXT ▶"), page_bar);
     next_btn_->setFixedHeight(24);
     next_btn_->setCursor(Qt::PointingHandCursor);
     next_btn_->setStyleSheet(btn_style);
@@ -233,16 +250,39 @@ void StrategyListPanel::render_page() {
         auto* id_item = new QTableWidgetItem(s.id);
         id_item->setForeground(QColor(colors::TEXT_TERTIARY()));
         table_->setItem(row, 3, id_item);
+
+        auto make_btn = [&](const QString& text, const QString& color, const QString& hover,
+                            int col, auto handler) {
+            auto* btn = new QPushButton(text, table_);
+            btn->setCursor(Qt::PointingHandCursor);
+            btn->setFixedHeight(22);
+            btn->setStyleSheet(
+                QString("QPushButton { background: transparent; color: %1; border: 1px solid %1;"
+                        " font-size: %2px; font-weight: 700; font-family: %3; padding: 1px 8px; }"
+                        "QPushButton:hover { background: %4; }")
+                    .arg(color)
+                    .arg(fonts::TINY)
+                    .arg(fonts::DATA_FAMILY())
+                    .arg(hover));
+            connect(btn, &QPushButton::clicked, this, handler);
+            table_->setCellWidget(row, col, btn);
+        };
+
+        // Col 4: EDIT (Builder). 5: BACKTEST. 6: DEPLOY. 7: DELETE.
+        make_btn(tr("EDIT"), colors::CYAN(), "rgba(34,211,238,0.1)", 4, [this, row]() { on_edit_clicked(row); });
+        make_btn(tr("BACKTEST"), colors::POSITIVE(), "rgba(22,163,74,0.1)", 5, [this, row]() { on_backtest_clicked(row); });
+        make_btn(tr("DEPLOY"), colors::AMBER(), "rgba(217,119,6,0.1)", 6, [this, row]() { on_deploy_clicked(row); });
+        make_btn(tr("DELETE"), colors::NEGATIVE(), "rgba(220,38,38,0.1)", 7, [this, row]() { on_delete_clicked(row); });
     }
 
     update_pagination_controls();
 
     page_label_->setText(total > 0
-        ? QString("Page %1 of %2  ·  %3 strategies").arg(page_num).arg(total_pages).arg(total)
-        : "No strategies");
+        ? tr("Page %1 of %2  ·  %3 strategies").arg(page_num).arg(total_pages).arg(total)
+        : tr("No strategies"));
 
     count_label_->setText(
-        QString("%1 of %2").arg(total).arg(strategies_.size()));
+        tr("%1 of %2").arg(total).arg(strategies_.size()));
 }
 
 void StrategyListPanel::update_pagination_controls() {
@@ -306,7 +346,7 @@ void StrategyListPanel::on_strategies_loaded(QVector<AlgoStrategy> strategies) {
     const QString prev_cat = cat_combo_->currentIndex() > 0 ? cat_combo_->currentText() : QString();
     cat_combo_->blockSignals(true);
     cat_combo_->clear();
-    cat_combo_->addItem("All Categories");
+    cat_combo_->addItem(tr("All Categories"));
     QStringList cats;
     for (const auto& s : strategies_)
         if (!cats.contains(s.description))
@@ -332,6 +372,123 @@ void StrategyListPanel::on_strategies_loaded(QVector<AlgoStrategy> strategies) {
 
 void StrategyListPanel::on_error(const QString& context, const QString& msg) {
     LOG_ERROR("AlgoTrading", QString("StrategyList error [%1]: %2").arg(context, msg));
+}
+
+void StrategyListPanel::on_edit_clicked(int row) {
+    const int abs_index = current_page_ * kPageSize + row;
+    if (abs_index < 0 || abs_index >= filtered_.size())
+        return;
+    emit edit_requested(filtered_[abs_index]); // AlgoTradingScreen routes to the Builder
+}
+
+void StrategyListPanel::on_backtest_clicked(int row) {
+    const int abs_index = current_page_ * kPageSize + row;
+    if (abs_index < 0 || abs_index >= filtered_.size())
+        return;
+    const auto& strategy = filtered_[abs_index];
+
+    // Prompt for symbol + date range before running.
+    QDialog dlg(this);
+    dlg.setWindowTitle(tr("Backtest: %1").arg(strategy.name));
+    auto* form = new QFormLayout(&dlg);
+
+    auto* symbol = new QLineEdit(QStringLiteral("RELIANCE"), &dlg);
+    symbol->setPlaceholderText(tr("e.g. RELIANCE, AAPL"));
+    const QDate today = QDate::currentDate();
+    // Default range sized to the strategy's timeframe (daily needs years for
+    // SMA200; intraday must stay under Yahoo's history cap).
+    const int lookback = services::algo::algo_default_lookback_days(strategy.timeframe);
+    auto* start = new QDateEdit(today.addDays(-lookback), &dlg);
+    auto* end = new QDateEdit(today, &dlg);
+    for (QDateEdit* d : {start, end}) {
+        d->setCalendarPopup(true);
+        d->setDisplayFormat(QStringLiteral("yyyy-MM-dd"));
+        d->setMinimumDate(QDate(2000, 1, 1));
+        d->setMaximumDate(today);
+    }
+    form->addRow(tr("Symbol"), symbol);
+    form->addRow(tr("Start"), start);
+    form->addRow(tr("End"), end);
+
+    auto* buttons = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, &dlg);
+    buttons->button(QDialogButtonBox::Ok)->setText(tr("Run Backtest"));
+    form->addRow(buttons);
+    connect(buttons, &QDialogButtonBox::accepted, &dlg, &QDialog::accept);
+    connect(buttons, &QDialogButtonBox::rejected, &dlg, &QDialog::reject);
+
+    if (dlg.exec() != QDialog::Accepted)
+        return;
+    if (symbol->text().trimmed().isEmpty() || start->date() >= end->date())
+        return;
+
+    emit backtest_requested(strategy, symbol->text().trimmed(),
+                            start->date().toString(QStringLiteral("yyyy-MM-dd")),
+                            end->date().toString(QStringLiteral("yyyy-MM-dd")));
+}
+
+void StrategyListPanel::on_deploy_clicked(int row) {
+    const int abs_index = current_page_ * kPageSize + row;
+    if (abs_index < 0 || abs_index >= filtered_.size())
+        return;
+
+    const auto& strategy = filtered_[abs_index];
+    AlgoDeployDialog dialog(strategy.id, strategy.name, this);
+    if (dialog.exec() == QDialog::Accepted) {
+        auto deployment = dialog.result();
+        fincept::algo::AlgoEngine::instance().start_deployment(deployment, strategy);
+        LOG_INFO("AlgoTrading", QString("Deploy requested: %1 on %2").arg(strategy.name, deployment.symbol));
+    }
+}
+
+void StrategyListPanel::on_delete_clicked(int row) {
+    const int abs_index = current_page_ * kPageSize + row;
+    if (abs_index < 0 || abs_index >= filtered_.size())
+        return;
+
+    const auto& strategy = filtered_[abs_index];
+    auto answer = QMessageBox::question(this, tr("Delete Strategy"),
+                                        tr("Delete \"%1\"?").arg(strategy.name),
+                                        QMessageBox::Yes | QMessageBox::No, QMessageBox::No);
+    if (answer == QMessageBox::Yes) {
+        AlgoTradingService::instance().delete_strategy(strategy.id);
+        LOG_INFO("AlgoTrading", QString("Delete requested: %1").arg(strategy.name));
+    }
+}
+
+// ── Live language switch ──────────────────────────────────────────────────────
+
+void StrategyListPanel::changeEvent(QEvent* event) {
+    if (event->type() == QEvent::LanguageChange)
+        retranslateUi();
+    QWidget::changeEvent(event);
+}
+
+void StrategyListPanel::retranslateUi() {
+    if (search_edit_)  search_edit_->setPlaceholderText(tr("Search strategies..."));
+    if (sort_caption_) sort_caption_->setText(tr("SORT:"));
+
+    // cat_combo_ item 0 is the fixed "All Categories" entry; remaining items are
+    // category data names and stay as-is.
+    if (cat_combo_ && cat_combo_->count() > 0)
+        cat_combo_->setItemText(0, tr("All Categories"));
+
+    // sort_combo_ — selection index drives logic, only the visible labels change.
+    if (sort_combo_ && sort_combo_->count() >= 3) {
+        sort_combo_->setItemText(0, tr("Name A→Z"));
+        sort_combo_->setItemText(1, tr("Name Z→A"));
+        sort_combo_->setItemText(2, tr("Category"));
+    }
+
+    if (prev_btn_) prev_btn_->setText(tr("◀ PREV"));
+    if (next_btn_) next_btn_->setText(tr("NEXT ▶"));
+
+    if (table_) {
+        table_->setHorizontalHeaderLabels(
+            {tr("#"), tr("STRATEGY NAME"), tr("CATEGORY"), tr("ID"), QString(), QString(), QString(), QString()});
+    }
+
+    // render_page() re-applies per-row button labels, page_label_, and count_label_.
+    render_page();
 }
 
 } // namespace fincept::screens

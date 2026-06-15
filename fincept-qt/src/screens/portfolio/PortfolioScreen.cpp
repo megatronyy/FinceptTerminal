@@ -25,6 +25,7 @@
 #include "screens/portfolio/PortfolioStatusBar.h"
 #include "screens/portfolio/PortfolioTxnPanel.h"
 #include "services/file_manager/FileManagerService.h"
+#include "services/cloud/CloudSyncEngine.h"
 #include "services/portfolio/PortfolioService.h"
 #include "storage/repositories/SettingsRepository.h"
 #include "ui/theme/Theme.h"
@@ -52,6 +53,13 @@ PortfolioScreen::PortfolioScreen(QWidget* parent) : QWidget(parent) {
     build_ui();
     refresh_theme(); // Apply theme-aware font sizes and colors on first build
 
+    // Reload the portfolio list from the local cache when a cloud pull lands.
+    connect(&fincept::services::cloud::CloudSyncEngine::instance(),
+            &fincept::services::cloud::CloudSyncEngine::cloud_data_changed, this, [](const QString& entity) {
+                if (entity == QLatin1String("portfolio"))
+                    services::PortfolioService::instance().load_portfolios();
+            });
+
     // Connect to PortfolioService signals
     auto& svc = services::PortfolioService::instance();
     connect(&svc, &services::PortfolioService::portfolios_loaded, this, &PortfolioScreen::on_portfolios_loaded);
@@ -70,6 +78,8 @@ PortfolioScreen::PortfolioScreen(QWidget* parent) : QWidget(parent) {
     connect(&svc, &services::PortfolioService::correlation_computed, this, [this](QHash<QString, double> matrix) {
         if (sector_panel_)
             sector_panel_->set_correlation(matrix);
+        if (detail_wrapper_)
+            detail_wrapper_->update_correlation(matrix);
     });
     connect(&svc, &services::PortfolioService::spy_history_loaded, this,
             [this](QStringList /*dates*/, QVector<double> /*closes*/) {
@@ -137,6 +147,10 @@ void PortfolioScreen::showEvent(QShowEvent* event) {
     QWidget::showEvent(event);
     refresh_timer_->start();
     status_bar_->start_clock();
+    if (blotter_ && !current_summary_.portfolio.broker_account_id.isEmpty())
+        blotter_->hub_resubscribe_broker_quotes(current_summary_.portfolio.broker_account_id);
+    // Rate-gated pull of cloud portfolios on screen entry (no-op when sync is off).
+    fincept::services::cloud::CloudSyncEngine::instance().request_pull(QStringLiteral("portfolio"));
 }
 
 void PortfolioScreen::hideEvent(QHideEvent* event) {
@@ -236,7 +250,9 @@ const portfolio::HoldingWithQuote* PortfolioScreen::find_holding(const QString& 
 
 
 QVariantMap PortfolioScreen::save_state() const {
-    return {{"portfolio_id", selected_id_}, {"symbol", selected_symbol_}};
+    QVariantMap state{{"portfolio_id", selected_id_}, {"symbol", selected_symbol_}};
+    if (positions_filter_edit_) state["filter"] = positions_filter_edit_->text();
+    return state;
 }
 
 void PortfolioScreen::restore_state(const QVariantMap& state) {
@@ -246,6 +262,8 @@ void PortfolioScreen::restore_state(const QVariantMap& state) {
         on_portfolio_selected(id);
     if (!sym.isEmpty())
         selected_symbol_ = sym;
+    if (positions_filter_edit_ && state.contains("filter"))
+        positions_filter_edit_->setText(state.value("filter").toString());
 }
 
 // ── IGroupLinked ─────────────────────────────────────────────────────────────

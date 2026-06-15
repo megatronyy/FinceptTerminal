@@ -16,10 +16,14 @@
 #include "core/logging/Logger.h"
 #include "trading/adapter/BrokerEnumMap.h"
 #include "trading/brokers/BrokerHttp.h"
+#include "trading/brokers/BrokerTokenUtil.h"
 #include "trading/instruments/InstrumentService.h"
 
 #include <QDateTime>
 #include <QJsonArray>
+#include <QSet>
+
+#include <algorithm>
 
 namespace fincept::trading {
 
@@ -82,16 +86,43 @@ QString DhanBroker::lookup_security_id(const QString& symbol, const QString& exc
 
 // ── Token expiry detection ────────────────────────────────────────────────────
 bool DhanBroker::is_token_expired(const BrokerHttpResponse& resp) {
-    if (resp.status_code == 401)
-        return true;
-    // Dhan sets errorType field for auth errors
     const QString error_type = resp.json.value("errorType").toString();
-    if (error_type == "Invalid_Authentication" || error_type == "Unauthorized")
-        return true;
-    // Also check raw body for auth error string (some endpoints return differently)
-    if (resp.raw_body.contains("Invalid_Authentication"))
-        return true;
-    return false;
+    const QString error_code = resp.json.value("errorCode").toString();
+    const QString msg = resp.json.value("errorMessage").toString();
+
+    // Rate-limiting / throttling is TRANSIENT — it must never be treated as an
+    // expired token (doing so disconnects a perfectly valid session). DhanHQ v2
+    // signals this with DH-904 ("Too many requests... try throttling") or 805
+    // (data-API connection/rate limit). Some gateways ride these on an HTTP 401,
+    // so this check comes first and short-circuits the 401 path below.
+    const bool rate_limited = error_code.contains("904") || error_code.contains("805") ||
+                              error_type.compare("Rate_Limit", Qt::CaseInsensitive) == 0 ||
+                              msg.contains("rate limit", Qt::CaseInsensitive) ||
+                              msg.contains("Too many requests", Qt::CaseInsensitive);
+    if (rate_limited) {
+        LOG_WARN(TAG, QString("Dhan rate-limited (status=%1 code=%2 type=%3) — NOT treating as token expiry; "
+                              "throttle and retry. msg=%4")
+                          .arg(resp.status_code)
+                          .arg(error_code, error_type, msg));
+        return false;
+    }
+
+    // Definitive auth-token failures per the DhanHQ v2 error annexure:
+    //   DH-901 invalid/expired, DH-807 expired, DH-809 invalid, DH-810 bad client id.
+    const bool auth_err = resp.status_code == 401 || error_type == "Invalid_Authentication" ||
+                          error_type == "Unauthorized" || error_code == "DH-901" || error_code == "DH-807" ||
+                          error_code == "DH-809" || error_code == "DH-810" ||
+                          resp.raw_body.contains("Invalid_Authentication");
+
+    if (auth_err) {
+        // Log the exact response that triggers a disconnect so a *misclassified*
+        // transient error is diagnosable from the log rather than guessed at.
+        LOG_WARN(TAG, QString("Dhan classified TOKEN_EXPIRED → will disconnect. status=%1 type=%2 code=%3 msg=%4 "
+                              "body=%5")
+                          .arg(resp.status_code)
+                          .arg(error_type, error_code, msg, resp.raw_body.left(400)));
+    }
+    return auth_err;
 }
 
 QString DhanBroker::checked_error(const BrokerHttpResponse& resp, const QString& fallback) {
@@ -104,6 +135,44 @@ QString DhanBroker::checked_error(const BrokerHttpResponse& resp, const QString&
     if (is_token_expired(resp))
         return "[TOKEN_EXPIRED] " + msg;
     return msg;
+}
+
+// Authoritative session check. DhanHQ v2 recommends GET /v2/profile, which
+// returns the account's dhanClientId + tokenValidity for a live token. This is
+// lighter and less prone to spurious errors than repeatedly polling fundlimit,
+// and it logs the raw response so any disconnect is fully diagnosable.
+SessionCheck DhanBroker::validate_session(const BrokerCredentials& creds) {
+    auto resp = BrokerHttp::instance().get(BASE + "/v2/profile", auth_headers(creds));
+    LOG_INFO(TAG, QString("validate_session GET /v2/profile → status=%1 success=%2 body=%3")
+                      .arg(resp.status_code)
+                      .arg(resp.success)
+                      .arg(resp.raw_body.left(300)));
+
+    // A 200 carrying the client id means the token is live. Parse the real
+    // tokenValidity ("DD/MM/YYYY HH:mm", IST) so the persisted expiry hint is
+    // updated to the broker's actual value instead of our coarse 24h estimate.
+    if (resp.success && (resp.json.contains("dhanClientId") || resp.json.contains("tokenValidity"))) {
+        qint64 exp = 0;
+        const QString tv = resp.json.value("tokenValidity").toString();
+        if (!tv.isEmpty()) {
+            QDateTime dt = QDateTime::fromString(tv, "dd/MM/yyyy HH:mm");
+            if (dt.isValid()) {
+                dt.setTimeZone(ist_zone());
+                exp = dt.toSecsSinceEpoch();
+            }
+        }
+        return {SessionCheck::Status::Valid, exp, QString()};
+    }
+
+    // Definitive auth failure → expired. Anything else (rate limit, 5xx,
+    // network) is inconclusive — the caller must NOT disconnect on it.
+    if (is_token_expired(resp))
+        return {SessionCheck::Status::Expired, 0,
+                QStringLiteral("[TOKEN_EXPIRED] ") + checked_error(resp, "token invalid/expired")};
+
+    LOG_WARN(TAG, QString("validate_session inconclusive (status=%1) — leaving connection state unchanged")
+                      .arg(resp.status_code));
+    return {SessionCheck::Status::Inconclusive, 0, checked_error(resp, "profile check failed")};
 }
 
 // ── Auth headers ──────────────────────────────────────────────────────────────
@@ -138,9 +207,13 @@ TokenExchangeResponse DhanBroker::exchange_token(const QString& api_key, const Q
     if (is_token_expired(resp)) {
         return {false, "", "", "", "", "[TOKEN_EXPIRED] Access token is invalid or expired"};
     }
-    // Accept any non-auth error (market closed, etc.) as token valid
+    // Accept any non-auth error (market closed, etc.) as token valid.
+    // Dhan v2 access tokens are valid for 24h from generation (rolling window).
+    // The live validation sweep is the authoritative guard; this expiry is only
+    // a startup hint so a token isn't shown green long after it has lapsed.
+    const QString extra = with_token_expiry({}, rolling_expiry_epoch(24));
     LOG_INFO(TAG, "Token exchange OK, client_id=" + api_key);
-    return {true, api_secret, /*refresh*/ "", api_key, /*additional*/ "", ""};
+    return {true, api_secret, /*refresh*/ "", api_key, /*additional*/ extra, ""};
 }
 
 // ── Place Order ───────────────────────────────────────────────────────────────
@@ -300,12 +373,12 @@ ApiResponse<QVector<BrokerPosition>> DhanBroker::get_positions(const BrokerCrede
             pos.avg_price = p.value("avgCostPrice").toDouble();
         // Positions don't carry an LTP field; callers wanting live MTM must
         // refresh via /v2/marketfeed/ltp. Leave 0 here.
+        // TODO: hydrate LTP to populate pnl_pct
         pos.ltp = 0.0;
         pos.pnl = p.value("unrealizedProfit").toDouble();
         pos.day_pnl = p.value("realizedProfit").toDouble();
         pos.side = qty > 0 ? "LONG" : "SHORT";
-        if (pos.avg_price > 0 && pos.ltp > 0)
-            pos.pnl_pct = (pos.ltp - pos.avg_price) / pos.avg_price * 100.0;
+        pos.pnl_pct = (pos.avg_price > 0.0) ? ((pos.ltp - pos.avg_price) / pos.avg_price) * 100.0 : 0.0;
         positions.append(pos);
     }
     return {true, positions, "", ts};
@@ -316,6 +389,12 @@ ApiResponse<QVector<BrokerPosition>> DhanBroker::get_positions(const BrokerCrede
 ApiResponse<QVector<BrokerHolding>> DhanBroker::get_holdings(const BrokerCredentials& creds) {
     int64_t ts = now_ts();
     auto resp = BrokerHttp::instance().get(BASE + "/v2/holdings", auth_headers(creds));
+
+    // Dhan reports "account has no holdings" as an ERROR envelope ("No holdings
+    // available") rather than an empty array — surface it as a successful empty
+    // result so a connected account isn't flagged as a failed fetch.
+    if (!is_token_expired(resp) && resp.raw_body.contains("No holdings available", Qt::CaseInsensitive))
+        return {true, QVector<BrokerHolding>{}, "", ts};
 
     if (!resp.success || resp.json.value("errorType").toString().length() > 0)
         return {false, std::nullopt, checked_error(resp, "get_holdings failed"), ts};
@@ -337,6 +416,7 @@ ApiResponse<QVector<BrokerHolding>> DhanBroker::get_holdings(const BrokerCredent
         holding.avg_price = h.value("avgCostPrice").toDouble();
         // /v2/holdings does NOT return an LTP field. Caller must hydrate via
         // /v2/marketfeed/ltp using securityId — leave zero rather than fabricate.
+        // TODO: hydrate LTP to populate current_value/pnl
         holding.ltp = 0.0;
         holding.invested_value = holding.quantity * holding.avg_price;
         holding.current_value = 0.0;
@@ -460,15 +540,17 @@ ApiResponse<QVector<BrokerCandle>> DhanBroker::get_history(const BrokerCredentia
     const QString seg = dhan_exchange(exch);
 
     // Determine daily vs intraday + interval string
-    bool is_daily = (resolution == "D" || resolution == "1D" || resolution == "W" || resolution == "M");
+    const QString res_lc = resolution.toLower();
+    const bool is_daily = (res_lc == "d" || res_lc == "1d" || res_lc == "w" || res_lc == "m");
     static const QMap<QString, QString> intraday_map = {
         {"1", "1"},   {"1m", "1"},   {"5", "5"},   {"5m", "5"},   {"15", "15"}, {"15m", "15"},
         {"25", "25"}, {"25m", "25"}, {"60", "60"}, {"60m", "60"}, {"1h", "60"},
     };
     const QString interval_str = intraday_map.value(resolution, "");
     if (!is_daily && interval_str.isEmpty()) {
-        // Unsupported resolution — fall back to daily
-        is_daily = true;
+        // Unsupported intraday interval (Dhan supports only 1/5/15/25/60) — error out
+        // rather than silently returning daily candles for a different timeframe.
+        return {false, std::nullopt, "Unsupported resolution for Dhan history: " + resolution, ts};
     }
 
     QDate from = QDate::fromString(from_date, "yyyy-MM-dd");
@@ -496,18 +578,25 @@ ApiResponse<QVector<BrokerCandle>> DhanBroker::get_history(const BrokerCredentia
         // Map exchange segment → Dhan `instrument` enum. EQUITY is correct only
         // for cash; F&O / currency / commodity each take a distinct value.
         // Spec values: EQUITY, INDEX, FUTIDX, FUTSTK, OPTIDX, OPTSTK,
-        //              FUTCUR, OPTCUR, FUTCOM, OPTCOM.
+        //              FUTCUR, OPTCUR, FUTCOM, OPTFUT.
         QString instrument = "EQUITY";
         if (seg == "NSE_FNO" || seg == "BSE_FNO") {
-            // Heuristic: option contract names end in CE/PE; futures end in FUT.
+            // Index derivatives use OPTIDX/FUTIDX; stock derivatives use OPTSTK/FUTSTK.
+            // Detect index underlyings by their well-known root symbols.
+            static const QSet<QString> kIdxRoots = {"NIFTY",      "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY",
+                                                    "NIFTYNXT50", "SENSEX",    "BANKEX",   "SENSEX50"};
+            const bool isIdx =
+                std::any_of(kIdxRoots.begin(), kIdxRoots.end(),
+                            [&](const QString& r) { return name.startsWith(r); });
+            // Heuristic: option contract names end in CE/PE; futures contain FUT.
             if (name.endsWith("CE") || name.endsWith("PE"))
-                instrument = "OPTSTK";
+                instrument = isIdx ? "OPTIDX" : "OPTSTK";
             else if (name.contains("FUT"))
-                instrument = "FUTSTK";
+                instrument = isIdx ? "FUTIDX" : "FUTSTK";
         } else if (seg == "IDX_I") {
             instrument = "INDEX";
         } else if (seg == "MCX_COMM") {
-            instrument = name.contains("FUT") ? "FUTCOM" : "OPTCOM";
+            instrument = name.contains("FUT") ? "FUTCOM" : "OPTFUT";
         } else if (seg == "NSE_CURRENCY" || seg == "BSE_CURRENCY") {
             instrument = name.contains("FUT") ? "FUTCUR" : "OPTCUR";
         }
@@ -541,7 +630,11 @@ ApiResponse<QVector<BrokerCandle>> DhanBroker::get_history(const BrokerCredentia
         const int count = qMin(timestamps.size(), closes.size());
         for (int i = 0; i < count; ++i) {
             BrokerCandle c;
-            c.timestamp = static_cast<int64_t>(timestamps[i].toDouble());
+            // Dhan returns epoch SECONDS; BrokerCandle.timestamp is milliseconds
+            // (EquityChartPanel divides by 1000 and rolls the live bar against
+            // currentMSecsSinceEpoch). Without ×1000 candles land in Jan 1970 and
+            // the forming bar rolls on every tick ("chart goes every second").
+            c.timestamp = static_cast<int64_t>(timestamps[i].toDouble()) * 1000;
             c.open = opens.size() > i ? opens[i].toDouble() : 0.0;
             c.high = highs.size() > i ? highs[i].toDouble() : 0.0;
             c.low = lows.size() > i ? lows[i].toDouble() : 0.0;
@@ -558,6 +651,195 @@ ApiResponse<QVector<BrokerCandle>> DhanBroker::get_history(const BrokerCredentia
               [](const BrokerCandle& a, const BrokerCandle& b) { return a.timestamp < b.timestamp; });
 
     return {true, all_candles, "", ts};
+}
+
+// ── Multi-Quote ──────────────────────────────────────────────────────────────
+// POST /v2/marketfeed/ltp — {NSE_EQ: [securityId1, securityId2...]}
+// Groups symbols by exchange segment, max 1000.
+// Response: {"data": {"NSE_EQ": {"12345": {"last_price": 500.0, ohlc: {...}}}}}
+ApiResponse<QVector<BrokerQuote>> DhanBroker::get_multi_quotes(
+    const BrokerCredentials& creds,
+    const QVector<QPair<QString, QString>>& symbols) {
+
+    int64_t ts = now_ts();
+    if (symbols.isEmpty())
+        return {true, QVector<BrokerQuote>{}, "", ts};
+
+    // Group securityIds by exchange segment, keep reverse map
+    QMap<QString, QJsonArray> by_segment;
+    QMap<QString, QPair<QString, QString>> id_to_orig; // "seg:secId" → (symbol, exchange)
+
+    for (const auto& [sym, exch] : symbols) {
+        const QString exchange = exch.isEmpty() ? "NSE" : exch;
+        const QString seg = dhan_exchange(exchange);
+        const QString sec_id = lookup_security_id(sym, exchange, creds.broker_id);
+        if (sec_id.isEmpty())
+            continue;
+        by_segment[seg].append(sec_id);
+        id_to_orig[seg + ":" + sec_id] = {sym, exchange};
+    }
+
+    if (by_segment.isEmpty())
+        return {false, std::nullopt, "No valid security IDs found", ts};
+
+    // Build request body
+    QJsonObject body;
+    for (auto it = by_segment.constBegin(); it != by_segment.constEnd(); ++it)
+        body[it.key()] = it.value();
+
+    auto resp = BrokerHttp::instance().post_json(BASE + "/v2/marketfeed/ltp", body, auth_headers(creds));
+    if (!resp.success || resp.json.value("errorType").toString().length() > 0)
+        return {false, std::nullopt, checked_error(resp, "get_multi_quotes failed"), ts};
+
+    // Parse response
+    QVector<BrokerQuote> quotes;
+    const auto data = resp.json.value("data").toObject();
+    for (auto seg_it = data.constBegin(); seg_it != data.constEnd(); ++seg_it) {
+        const QString seg = seg_it.key();
+        const auto tokens = seg_it.value().toObject();
+        for (auto tok_it = tokens.constBegin(); tok_it != tokens.constEnd(); ++tok_it) {
+            const auto q = tok_it.value().toObject();
+            BrokerQuote quote;
+            const QString lookup_key = seg + ":" + tok_it.key();
+            if (id_to_orig.contains(lookup_key))
+                quote.symbol = id_to_orig.value(lookup_key).first;
+            else
+                quote.symbol = tok_it.key();
+            quote.ltp = q.value("last_price").toDouble();
+            const auto ohlc = q.value("ohlc").toObject();
+            quote.open = ohlc.value("open").toDouble(q.value("open").toDouble());
+            quote.high = ohlc.value("high").toDouble(q.value("high").toDouble());
+            quote.low = ohlc.value("low").toDouble(q.value("low").toDouble());
+            quote.close = ohlc.value("close").toDouble(q.value("close").toDouble());
+            quote.volume = q.value("volume").toDouble();
+            if (quote.close > 0) {
+                quote.change = quote.ltp - quote.close;
+                quote.change_pct = (quote.ltp - quote.close) / quote.close * 100.0;
+            }
+            quote.timestamp = ts;
+            quotes.append(quote);
+        }
+    }
+    return {true, quotes, "", ts};
+}
+
+// ── Market Depth ─────────────────────────────────────────────────────────────
+// POST /v2/marketfeed/ohlc — {NSE_EQ: [securityId]}
+// Returns OHLC + depth data for the requested security.
+// Response: {"data": {"NSE_EQ": {"12345": {last_price, ohlc:{...}, depth:{buy:[...], sell:[...]}}}}}
+ApiResponse<MarketDepth> DhanBroker::get_market_depth(
+    const BrokerCredentials& creds,
+    const QString& symbol, const QString& exchange) {
+
+    int64_t ts = now_ts();
+    const QString exch = exchange.isEmpty() ? "NSE" : exchange;
+    const QString seg = dhan_exchange(exch);
+    const QString sec_id = lookup_security_id(symbol, exch, creds.broker_id);
+    if (sec_id.isEmpty())
+        return {false, std::nullopt, "Security ID not found for " + exch + ":" + symbol, ts};
+
+    QJsonObject body;
+    QJsonArray ids;
+    ids.append(sec_id);
+    body[seg] = ids;
+
+    auto resp = BrokerHttp::instance().post_json(BASE + "/v2/marketfeed/ohlc", body, auth_headers(creds));
+    if (!resp.success || resp.json.value("errorType").toString().length() > 0)
+        return {false, std::nullopt, checked_error(resp, "get_market_depth failed"), ts};
+
+    // Navigate: data → segment → securityId
+    const auto data = resp.json.value("data").toObject();
+    const auto seg_obj = data.value(seg).toObject();
+    const auto entry = seg_obj.value(sec_id).toObject();
+    if (entry.isEmpty())
+        return {false, std::nullopt, "No data returned for " + seg + ":" + sec_id, ts};
+
+    MarketDepth md;
+    md.symbol = symbol;
+    md.exchange = exch;
+    md.ltp = entry.value("last_price").toDouble();
+    md.volume = entry.value("volume").toDouble();
+    md.oi = entry.value("oi").toDouble();
+
+    const auto depth = entry.value("depth").toObject();
+
+    const auto buy_arr = depth.value("buy").toArray();
+    for (const auto& level : buy_arr) {
+        auto lv = level.toObject();
+        DepthLevel dl;
+        dl.price = lv.value("price").toDouble();
+        dl.quantity = lv.value("quantity").toInt();
+        dl.orders = lv.value("orders").toInt();
+        md.bids.append(dl);
+    }
+
+    const auto sell_arr = depth.value("sell").toArray();
+    for (const auto& level : sell_arr) {
+        auto lv = level.toObject();
+        DepthLevel dl;
+        dl.price = lv.value("price").toDouble();
+        dl.quantity = lv.value("quantity").toInt();
+        dl.orders = lv.value("orders").toInt();
+        md.asks.append(dl);
+    }
+
+    return {true, md, "", ts};
+}
+
+// ============================================================================
+// Pre-trade margin calculator — POST /v2/margincalculator  (native, single order)
+// Mirrors OpenAlgo broker/dhan/api/margin_api.py + mapping/margin_data.py.
+// Payload: {dhanClientId, exchangeSegment, transactionType, quantity,
+//           productType, securityId, price, triggerPrice?}
+//   productType for margin: CNC→CNC, NRML→MARGIN, MIS→INTRADAY (matches dhan_enum_map).
+// Response: {totalMargin, spanMargin, exposureMargin, variableMargin, availableBalance,
+//            leverage, brokerage, ...}
+// ============================================================================
+ApiResponse<OrderMargin> DhanBroker::get_order_margins(const BrokerCredentials& creds, const UnifiedOrder& order) {
+    int64_t ts = now_ts();
+
+    const QString sec_id = lookup_security_id(order.symbol, order.exchange, creds.broker_id);
+    if (sec_id.isEmpty())
+        return {false, std::nullopt, "Security ID not found for " + order.exchange + ":" + order.symbol, ts};
+
+    QJsonObject body;
+    body["dhanClientId"] = creds.api_key;
+    body["exchangeSegment"] = dhan_exchange(order.exchange);
+    body["transactionType"] = order.side == OrderSide::Buy ? "BUY" : "SELL";
+    body["quantity"] = static_cast<int>(order.quantity);
+    body["productType"] = dhan_enum_map().product_or(order.product_type, "INTRADAY");
+    body["securityId"] = sec_id;
+    body["price"] = order.price;
+    if (order.stop_price > 0)
+        body["triggerPrice"] = order.stop_price;
+
+    auto resp = BrokerHttp::instance().post_json(BASE + "/v2/margincalculator", body, auth_headers(creds));
+    if (!resp.success)
+        return {false, std::nullopt, checked_error(resp, "Network error"), ts};
+    if (is_token_expired(resp))
+        return {false, std::nullopt, "[TOKEN_EXPIRED]", ts};
+    if (resp.json.value("errorType").toString().length() > 0 || resp.json.value("status").toString() == "failed")
+        return {false, std::nullopt, checked_error(resp, "Margin calculation failed"), ts};
+
+    const auto& j = resp.json;
+    OrderMargin m;
+    m.symbol = order.symbol;
+    m.exchange = order.exchange;
+    m.side = order.side == OrderSide::Buy ? "BUY" : "SELL";
+    m.quantity = order.quantity;
+    m.price = order.price;
+    m.total = j.value("totalMargin").toDouble();
+    m.var_margin = j.value("spanMargin").toDouble();      // SPAN
+    m.elm = j.value("exposureMargin").toDouble();         // Exposure
+    m.additional = j.value("variableMargin").toDouble();  // VAR / variable margin
+    m.cash = j.value("availableBalance").toDouble();
+    m.leverage = j.value("leverage").toDouble();
+    if (m.leverage <= 0.0) {
+        const double notional = order.price * order.quantity;
+        if (m.total > 0.0 && notional > 0.0)
+            m.leverage = notional / m.total;
+    }
+    return {true, m, "", ts};
 }
 
 } // namespace fincept::trading

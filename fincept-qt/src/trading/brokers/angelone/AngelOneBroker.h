@@ -47,6 +47,11 @@ class AngelOneBroker : public IBroker {
 
     TokenExchangeResponse exchange_token(const QString& api_key, const QString& api_secret,
                                          const QString& auth_code) override;
+
+    // Angel One JWTs expire ~2.5h; silent refresh replays the stored TOTP login.
+    bool supports_silent_refresh() const override { return true; }
+    TokenExchangeResponse refresh_session(const BrokerCredentials& creds) override;
+
     OrderPlaceResponse place_order(const BrokerCredentials& creds, const UnifiedOrder& order) override;
     ApiResponse<QJsonObject> modify_order(const BrokerCredentials& creds, const QString& order_id,
                                           const QJsonObject& mods) override;
@@ -58,6 +63,16 @@ class AngelOneBroker : public IBroker {
     ApiResponse<BrokerFunds> get_funds(const BrokerCredentials& creds) override;
     ApiResponse<QVector<BrokerQuote>> get_quotes(const BrokerCredentials& creds,
                                                  const QVector<QString>& symbols) override;
+
+    // --- Multi-quote & Market Depth ---
+    ApiResponse<QVector<BrokerQuote>> get_multi_quotes(
+        const BrokerCredentials& creds,
+        const QVector<QPair<QString, QString>>& symbols) override;
+
+    ApiResponse<MarketDepth> get_market_depth(
+        const BrokerCredentials& creds,
+        const QString& symbol, const QString& exchange) override;
+
     ApiResponse<QVector<BrokerCandle>> get_history(const BrokerCredentials& creds, const QString& symbol,
                                                    const QString& resolution, const QString& from_date,
                                                    const QString& to_date) override;
