@@ -1089,7 +1089,6 @@ set(TRADING_SOURCES
     src/trading/ActionCenter.cpp
     src/trading/OptionsStrategyBuilder.cpp
     src/trading/StrategyPortfolio.cpp
-    src/trading/WebhookListener.cpp
     src/trading/OrderValidator.cpp
     src/trading/LatencyTracker.cpp
     src/trading/TradingNotificationBridge.cpp
@@ -2690,7 +2689,6 @@ set_source_files_properties(
     src/trading/ActionCenter.cpp
     src/trading/StrategyPortfolio.cpp
     src/trading/OptionsStrategyBuilder.cpp
-    src/trading/WebhookListener.cpp
     # Phase 3 storage/core — file-scope kLog / anonymous-namespace helpers
     src/storage/HistoricalDataStore.cpp
     src/core/HealthMonitor.cpp
@@ -3087,9 +3085,13 @@ message(STATUS "OpenSSL found: ${OPENSSL_VERSION} — include: ${OPENSSL_INCLUDE
 # zlib: gzip (Upstox master) + zip (Shoonya symbol masters) decompression.
 # See trading/instruments/InstrumentDecompress.cpp. System zlib on macOS/Linux,
 # Qt-bundled on Windows.
-find_package(ZLIB REQUIRED)
-message(STATUS "ZLIB found: ${ZLIB_VERSION_STRING}")
-
+if(WIN32)
+    find_package(Qt6ZlibPrivate REQUIRED)
+    message(STATUS "Using Qt bundled Zlib")
+else()
+    find_package(ZLIB REQUIRED)
+    message(STATUS "ZLIB found: ${ZLIB_VERSION_STRING}")
+endif()
 # ── macOS: make Qt's openssl TLS plugin discoverable ─────────────────────────
 # Qt's libqopensslbackend.dylib only searches /usr/local/lib, /opt/local/lib,
 # /sw/lib, /usr/lib and Qt's own lib dir for libssl/libcrypto. Homebrew on
@@ -3143,10 +3145,13 @@ target_link_libraries(FinceptTerminal PRIVATE
     qtadvanceddocking-qt6
     OpenSSL::SSL
     OpenSSL::Crypto
-    ZLIB::ZLIB
     fincept_ed25519
 )
-
+if(WIN32)
+    target_link_libraries(FinceptTerminal PRIVATE Qt6::ZlibPrivate)
+else()
+    target_link_libraries(FinceptTerminal PRIVATE ZLIB::ZLIB)
+endif()
 # SecureStorage no longer needs platform-specific credential frameworks —
 # it's pure SQLite + AES-256-GCM (OpenSSL) on every platform. See
 # storage/secure/SecureStorage.cpp.
